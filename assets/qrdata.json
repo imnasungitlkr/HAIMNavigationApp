@@ -1,0 +1,326 @@
+{
+    "QG1": {
+        "id": "QG1",
+        "name": "Gate 1",
+        "context": "You are currently at Gate number 1",
+        "current_location": [
+            23.762825,
+            91.266438
+        ],
+        "neighbours": [
+            "AU1"
+        ]
+    },
+    "QG2": {
+        "id": "QG2",
+        "name": "Gate 2",
+        "context": "You are currently at Gate 2",
+        "current_location": [
+            23.76213,
+            91.26698
+        ],
+        "neighbours": [
+            "AD2",
+            "AD1"
+        ]
+    },
+    "QG3": {
+        "id": "QG3",
+        "name": "Gate 3",
+        "context": "You are currently at Gate 3",
+        "current_location": [
+            23.761199,
+            91.267453
+        ],
+        "neighbours": [
+            "QB1",
+            "SB1",
+            "AU2"
+        ]
+    },
+    "QG4": {
+        "id": "QG4",
+        "name": "Gate 4",
+        "context": "You are currently at Gate 4",
+        "current_location": [
+            23.75914,
+            91.26497
+        ],
+        "neighbours": [
+            "QB1",
+            "QH1",
+            "HO1"
+        ]
+    },
+    "QG5": {
+        "id": "QG5",
+        "name": "Gate 5",
+        "context": "You are currently at Gate 5",
+        "current_location": [
+            23.76446,
+            91.26122
+        ],
+        "neighbours": [
+            "QH2",
+            "BA1"
+        ]
+    },
+    "QB4": {
+        "id": "QB4",
+        "name": "Physics Department",
+        "context": "You are currently in front of Physics Department",
+        "current_location": [
+            23.761785,
+            91.264540
+        ],
+        "neighbours": [
+            "QB3",
+            "QBR1"
+        ]
+    },
+    "NG1": {
+        "id": "NG1",
+        "name": "Guest House",
+        "context": "You are currently infront of the New Guest House",
+        "current_location": [
+            23.76057,
+            91.26247
+        ],
+        "neighbours": [
+            "HO1",
+            "QIN"
+        ]
+    },
+    "QIN": {
+        "id": "QIN",
+        "name": "Inter Junction",
+        "context": "You are at an Inter Junction",
+        "current_location": [
+            23.76132,
+            91.26195
+        ],
+        "neighbours": [
+            "QB9",
+            "QBR1",
+            "NG1"
+        ]
+    },
+    "QB9": {
+        "id": "QB9",
+        "name": "I.T Department (Building 9)",
+        "context": "You are at currrently at Building 9 (Department of Information Technology)",
+        "current_location": [
+            23.761647,
+            91.261957
+        ],
+        "neighbours": [
+            "QB10",
+            "QIN"
+        ]
+    },
+    "QB10": {
+        "id": "QB10",
+        "name": "MBA Department (Building 10)",
+        "context": "You are currently at Building 10 (Department of MBA)",
+        "current_location": [
+            23.76179,
+            91.26188
+        ],
+        "neighbours": [
+            "QH2",
+            "QB9"
+        ]
+    },
+    "QH2": {
+        "id": "QH2",
+        "name": "Boys Hostel",
+        "context": "You are currently at the Boys Hostel",
+        "current_location": [
+            23.761994,
+            91.261953
+        ],
+        "neighbours": [
+            "QB10",
+            "QG5"
+        ]
+    },
+    "SB1": {
+        "id": "SB1",
+        "name": "STATE BANK OF INDIA",
+        "context": "You are currently at the SBI BANK",
+        "current_location": [
+            23.761103,
+            91.267387
+        ],
+        "neighbours": [
+            "QG3",
+            "QB1",
+            "AU2"
+        ]
+    },
+    "AU2": {
+        "id": "AU2",
+        "name": "Open Auditorium",
+        "context": "You are currently at the Open Auditorium",
+        "current_location": [
+            23.761301,
+            91.267344
+        ],
+        "neighbours": [
+            "QG3",
+            "QB1",
+            "SB1",
+            "PO1"
+        ]
+    },
+    "PO1": {
+        "id": "PO1",
+        "name": "POST OFFICE",
+        "context": "You are currently at the POST OFFICE",
+        "current_location": [
+            23.761898,
+            91.267030
+        ],
+        "neighbours": [
+            "AD1",
+            "AU2"
+        ]
+    },
+    "AD1": {
+        "id": "AD1",
+        "name": "ADMINISTRATION BUILDING",
+        "context": "You are currently at the ADMISTRATION BUILDING",
+        "current_location": [
+            23.762024,
+            91.266926
+        ],
+        "neighbours": [
+            "AD2",
+            "PO1",
+            "QG2"
+        ]
+    },
+    "AD2": {
+        "id": "AD2",
+        "name": "PAREEKSHA BHAVAN",
+        "context": "You are currently at the PAREEKSHA BHAVAN",
+        "current_location": [
+            23.762623,
+            91.266447
+        ],
+        "neighbours": [
+            "AD1",
+            "AU1",
+            "QG2"
+        ]
+    },
+    "AU1": {
+        "id": "AU1",
+        "name": "MBB AUDITORIUM",
+        "context": "You are currently at the MBB AUDITORIUM",
+        "current_location": [
+            23.762782,
+            91.266341
+        ],
+        "neighbours": [
+            "QG1",
+            "AD2"
+        ]
+    },
+    "QB1": {
+        "id": "QB1",
+        "name": "LIBRARY",
+        "context": "You are currently at the LIBRARY",
+        "current_location": [
+            23.760949,
+            91.266845
+        ],
+        "neighbours": [
+            "QG3",
+            "QG4",
+            "AU2",
+            "SB1",
+            "QC1"
+        ]
+    },
+    "QC1": {
+        "id": "QC1",
+        "name": "AMUL SHOP",
+        "context": "You are currently at the AMUL SHOP",
+        "current_location": [
+            23.760984,
+            91.266394
+        ],
+        "neighbours": [
+            "QB3",
+            "QB1"
+        ]
+    },
+    "QB3": {
+        "id": "QB3",
+        "name": "COMMERCE DEPARTMENT",
+        "context": "You are currently at the COMMERCE DEPARTMENT",
+        "current_location": [
+            23.76133,
+            91.26523
+        ],
+        "neighbours": [
+            "QC1",
+            "QB4",
+            "QH1"
+        ]
+    },
+    "QH1": {
+        "id": "QH1",
+        "name": "GIRLS HOSTEL",
+        "context": "You are currently at the GIRLS HOSTEL",
+        "current_location": [
+            23.75953,
+            91.26518
+        ],
+        "neighbours": [
+            "HO1",
+            "QG4",
+            "QB3"
+        ]
+    },
+    "QBR1": {
+        "id": "QBR1",
+        "name": "BRIDGE",
+        "context": "You are currently at the BRIDGE",
+        "current_location": [
+            23.761587,
+            91.263005
+        ],
+        "neighbours": [
+            "QB4",
+            "QIN"
+        ]
+    },
+    "HO1": {
+        "id": "HO1",
+        "name": "UNIVERSITY HOSPITAL",
+        "context": "You are currently at the UNIVERSITY HOSPITAL",
+        "current_location": [
+            23.75951,
+            91.26456
+        ],
+        "neighbours": [
+            "QG4",
+            "NG1",
+            "QH1"
+        ]
+    },
+    "BA1": {
+        "id": "BA1",
+        "name": "BASE",
+        "context": "You are currently at the base",
+        "current_location": [
+            23.765335323846774,
+            91.26092739595353
+        ],
+        "neighbours": [
+            "QG5"
+        ]
+    }
+}
