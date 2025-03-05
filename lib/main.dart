@@ -1250,6 +1250,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       return;
     }
 
+    // Build the polyline for the entire QR path
     List<LatLng> pathPoints = [];
     for (int i = 0; i < qrPath.length - 1; i++) {
       LatLng startPos = LatLng(_qrData[qrPath[i]]['current_location'][0], _qrData[qrPath[i]]['current_location'][1]);
@@ -1282,36 +1283,100 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     int currentIndex = qrPath.indexOf(_lastDetectedQrId ?? qrPath[0]);
     if (currentIndex == -1) currentIndex = 0;
 
-    while (_isNavigating && currentIndex < qrPath.length - 1) {
-      String currentQrId = qrPath[currentIndex];
+    // Start listening to location updates
+    StreamSubscription<Position>? positionStream;
+    DateTime lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5)); // Ensure first announcement is immediate
+    double lastDistance = double.infinity;
+
+    positionStream = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 1, // Update every meter
+      ),
+    ).listen((Position position) async {
+      if (!_isNavigating) {
+        positionStream?.cancel();
+        return;
+      }
+
+      _getCurrentLocation(position); // Update current position
+      LatLng currentPos = LatLng(position.latitude, position.longitude);
+
       String nextQrId = qrPath[currentIndex + 1];
-      LatLng currentQrPos = LatLng(_qrData[currentQrId]['current_location'][0], _qrData[currentQrId]['current_location'][1]);
       LatLng nextQrPos = LatLng(_qrData[nextQrId]['current_location'][0], _qrData[nextQrId]['current_location'][1]);
 
-      double totalDistance = Geolocator.distanceBetween(
-        currentQrPos.latitude,
-        currentQrPos.longitude,
+      double distanceToNextQr = Geolocator.distanceBetween(
+        currentPos.latitude,
+        currentPos.longitude,
         nextQrPos.latitude,
         nextQrPos.longitude,
       );
 
-      if (_lastDetectedQrId == currentQrId || currentIndex == 0) {
-        await _speak("Starting from ${_qrData[currentQrId]['name']}. Your next stop is ${_qrData[nextQrId]['name']} in ${totalDistance.toStringAsFixed(0)} meters.");
-        await _speak("Scan the QR code at ${_qrData[nextQrId]['name']} when you arrive.");
+      // Check if user has reached the next QR code
+      if (_lastDetectedQrId == nextQrId || distanceToNextQr < 5) {
+        currentIndex++;
+        if (currentIndex >= qrPath.length - 1) {
+          await _speak("You have reached your destination: ${_qrData[qrPath.last]['name']}.");
+          await _stopNavigation();
+          positionStream?.cancel();
+          return;
+        }
+        await _speak("QR code ${_qrData[nextQrId]['name']} detected. Proceeding to next stop.");
+        lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5)); // Force next announcement
+        return;
       }
 
-      await _waitForNextQrOrFallback(nextQrId, nextQrPos);
-      if (!_isNavigating) return; // Exit if navigation stopped
-      currentIndex = qrPath.indexOf(_lastDetectedQrId ?? qrPath[currentIndex]);
-      if (currentIndex == -1) currentIndex = 0;
+      // Check if user is too far off path
+      if (distanceToNextQr > 150) {
+        await _speak("You are ${distanceToNextQr.toStringAsFixed(0)} meters off the QR path. Switching to GPS navigation.");
+        await _fetchAndSpeakDirections(currentPos, _destination!);
+        positionStream?.cancel();
+        return;
+      }
+
+      // Periodic distance updates (every 5 seconds or significant change)
+      bool shouldAnnounce = DateTime.now().difference(lastAnnouncement) >= const Duration(seconds: 5) ||
+          (lastDistance - distanceToNextQr).abs() > 10; // Announce if distance changes by 10m
+
+      if (shouldAnnounce && !_isTtsSpeaking) {
+        String announcement;
+        if (distanceToNextQr <= 10) {
+          announcement = "In ${distanceToNextQr.toStringAsFixed(0)} meters, scan the next QR code at ${_qrData[nextQrId]['name']}.";
+        } else {
+          announcement = "You are ${distanceToNextQr.toStringAsFixed(0)} meters away from ${_qrData[nextQrId]['name']}. Head forward.";
+        }
+        await _speak(announcement);
+        lastAnnouncement = DateTime.now();
+        lastDistance = distanceToNextQr;
+      }
+    }, onError: (error) {
+      print('Location stream error: $error');
+      _speak("Error tracking your location. Please ensure GPS is enabled.");
+    });
+
+    // Initial announcement
+    if (_currentPosition != null) {
+      LatLng currentPos = LatLng(_currentPosition!.latitude, _currentPosition!.longitude);
+      String nextQrId = qrPath[currentIndex + 1];
+      double initialDistance = Geolocator.distanceBetween(
+        currentPos.latitude,
+        currentPos.longitude,
+        _qrData[nextQrId]['current_location'][0],
+        _qrData[nextQrId]['current_location'][1],
+      );
+      await _speak("Starting from ${_qrData[qrPath[currentIndex]]['name']}. Your next stop is ${_qrData[nextQrId]['name']} in ${initialDistance.toStringAsFixed(0)} meters.");
     }
 
-    if (_isNavigating && _lastDetectedQrId == qrPath.last) {
-      await _speak("You have reached your destination: ${_qrData[qrPath.last]['name']}.");
-      await _stopNavigation();
-    }
+    // Wait for navigation to complete or be interrupted
+    await Future.doWhile(() async {
+      await Future.delayed(const Duration(seconds: 1));
+      return _isNavigating;
+    });
+
+    positionStream.cancel();
   }
 
+  // ignore: unused_element: _waitForNextQrOrFallback
   Future<void> _waitForNextQrOrFallback(String expectedQrId, LatLng nextQrPos) async {
     const timeout = Duration(seconds: 120);
     DateTime startTime = DateTime.now();
