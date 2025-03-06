@@ -118,6 +118,8 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   DateTime _lastDirectionFetch = DateTime.now();
   final Duration _debounceDuration = Duration(seconds: 10);
   bool _awaitingGpsSwitchResponse = false;
+  bool _lastAnnouncedBelowThreshold = false;
+  DateTime? _lastObjectAnnouncementTime;
 
   final List<Landmark> landmarks = [];
 
@@ -303,9 +305,63 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   }
 
   Future<void> _processCommand(String command) async {
-    final locationCommands = ['where am i', 'location', 'my position'];
-    final destCommands = ['set destination', 'i want to go to', 'go to', 'navigate to'];
-    final stopCommands = ['stop navigation', 'end navigation', 'stop'];
+    final locationCommands = [
+      'where am i',
+      'location',
+      'my position',
+      'where am i at',
+      'where’s my location',
+      'tell me my location',
+      'what’s my position',
+      'where am i now',
+      'current location',
+      'my current position',
+      'where am i standing',
+      'give me my location',
+    ];
+    final destCommands = [
+      'set destination',
+      'i want to go to',
+      'go to',
+      'navigate to',
+      'take me to',
+      'head to',
+      'direct me to',
+      'guide me to',
+      'bring me to',
+      'set my destination to',
+      'i’d like to go to',
+      'travel to',
+      'point me to',
+    ];
+    final stopCommands = [
+      'stop navigation',
+      'end navigation',
+      'stop',
+      'quit navigation',
+      'cancel navigation',
+      'halt navigation',
+      'stop guiding',
+      'end trip',
+      'cease navigation',
+      'pause navigation',
+      'finish navigation',
+      'stop directions',
+    ];
+    final objectCommands = [
+      'what is in front of me',
+      'what’s in front of me',
+      'what’s ahead of me',
+      'what is ahead',
+      'what’s up ahead',
+      'tell me what’s in front',
+      'what objects are in front',
+      'what’s blocking me',
+      'what’s in my way',
+      'what do i see ahead',
+      'what’s out there',
+      'list objects in front',
+    ];
 
     if (locationCommands.any((cmd) => command.contains(cmd))) {
       await _handleWhereAmI();
@@ -320,8 +376,17 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     } else if (_isNavigating && stopCommands.any((cmd) => command.contains(cmd))) {
       await _stopNavigation();
       await _speak("Navigation stopped.");
+    } else if (objectCommands.any((cmd) => command.contains(cmd))) {
+      if (_detectedObjects.isNotEmpty) {
+        String objectsText = "In front of you: ${_detectedObjects.join(", ")}";
+        await _speak(objectsText);
+      } else if (_distanceFromSensor != null && _distanceFromSensor! < 75) {
+        await _speak("An obstacle is in front of you, but no specific objects detected.");
+      } else {
+        await _speak("No objects detected in front of you right now.");
+      }
     } else {
-      await _speak("I didn’t understand that. Please press the microphone button and try again with commands like 'where am I' or 'set destination to Library.'");
+      await _speak("I didn’t understand that. Please press the microphone button and try again with commands like 'where am I', 'set destination to Library', or 'what is in front of me'.");
     }
     setState(() => _recognizedText = '');
   }
@@ -550,10 +615,38 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           _detectedObjects = newDetectedObjects;
         });
 
-        if (_distanceFromSensor != null && _distanceFromSensor! < 75) {
-          if (await Vibration.hasVibrator()) {
-            Vibration.vibrate(duration: 500);
+        bool isBelowThreshold = _distanceFromSensor != null && _distanceFromSensor! < 75;
+
+        // Continuous vibration while below threshold
+        if (isBelowThreshold && await Vibration.hasVibrator()) {
+          Vibration.vibrate(duration: 500);
+        }
+
+        // TTS announcement logic
+        if (isBelowThreshold && !_isTtsSpeaking) {
+          bool shouldAnnounce = false;
+          if (!_lastAnnouncedBelowThreshold) {
+            // Initial announcement when threshold is first crossed
+            shouldAnnounce = true;
+            _lastAnnouncedBelowThreshold = true;
+          } else if (_lastObjectAnnouncementTime != null &&
+              DateTime.now().difference(_lastObjectAnnouncementTime!).inSeconds >= 5) {
+            // Periodic announcement every 5 seconds
+            shouldAnnounce = true;
           }
+
+          if (shouldAnnounce) {
+            if (_detectedObjects.isNotEmpty) {
+              String objectsText = _detectedObjects.join(", ") + " detected";
+              _speak(objectsText);
+            } else {
+              _speak("An obstacle is in front of you, but no specific objects detected.");
+            }
+            _lastObjectAnnouncementTime = DateTime.now(); // Update timestamp
+          }
+        } else if (!isBelowThreshold && _lastAnnouncedBelowThreshold) {
+          // Reset flag when distance goes above threshold
+          _lastAnnouncedBelowThreshold = false;
         }
 
         if (data['qr_codes'] != null && data['qr_codes'].isNotEmpty) {
@@ -1630,18 +1723,18 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                 children: [
                   Positioned.fill(
                     child: Opacity(
-                      opacity: 0.7,
+                      opacity: 1,
                       child: Image.asset('assets/map.png', fit: BoxFit.cover),
                     ),
                   ),
                   Center(
                     child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 2.0, sigmaY: 2.0),
+                      filter: ImageFilter.blur(sigmaX: 0.0, sigmaY: 0.0),
                       child: Container(
-                        color: Colors.blue.withOpacity(0.2),
+                        color: Colors.black.withOpacity(0.2),
                         padding: const EdgeInsets.all(5.0),
                         child: const Text(
-                          'Navi App',
+                          'HAIM App',
                           style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
                         ),
                       ),
