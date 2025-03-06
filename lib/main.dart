@@ -648,7 +648,8 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (path.isNotEmpty) {
         if (path.length > 1) {
           String nextQr = path[1];
-          await _speak("You are on the correct path. Next stop: ${_qrData[nextQr]['name']}");
+          await _speak("You are on the correct path. Next stop: ${_qrData[nextQr]['name']}.");
+          // Instructions will be provided in _navigateThroughQrPath when scanned
         } else {
           await _speak("You have reached your destination.");
           await _stopNavigation();
@@ -1187,27 +1188,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         await _speak("Starting QR navigation from ${_qrData[startQrId]['name']} to ${_qrData[qrId]['name']}.");
         List<String> qrPath = findShortestPath(startQrId!, qrId);
         if (qrPath.isNotEmpty) {
+          // Announce the full path upfront (as you like this)
           await _announceQrPath(qrPath);
-          await _speak("Here are your QR directions:");
-          for (int i = 0; i < qrPath.length - 1; i++) {
-            if (!_isNavigating) return; // Check to exit if stopped
-            String currentQr = qrPath[i];
-            String nextQr = qrPath[i + 1];
-            LatLng currentPos = LatLng(_qrData[currentQr]['current_location'][0], _qrData[currentQr]['current_location'][1]);
-            LatLng nextPos = LatLng(_qrData[nextQr]['current_location'][0], _qrData[nextQr]['current_location'][1]);
-            var directionsResult = await getDirectionsWithSteps(currentPos, nextPos, apiKey);
-            List<String> steps = directionsResult['directions'];
-
-            await _speak("From ${_qrData[currentQr]['name']} to ${_qrData[nextQr]['name']}:");
-            for (int j = 0; j < steps.length; j++) {
-              if (!_isNavigating) return; // Check to exit if stopped
-              String refinedStep = _refineDirection(steps[j]);
-              await _speak("Step ${j + 1}: $refinedStep");
-              if (j < steps.length - 1) await _speak("next");
-            }
-            if (i < qrPath.length - 2) await _speak("then proceed to the next QR");
-          }
-          await _speak("over");
+          // Start step-by-step navigation without immediate full instructions
           await _navigateThroughQrPath(qrPath);
         } else {
           await _speak("No direct QR path found from ${_qrData[startQrId]['name']} to ${_qrData[qrId]['name']}. Switching to GPS navigation.");
@@ -1255,7 +1238,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       return;
     }
 
-    // Build the polyline for the entire QR path
+    // Build the polyline for the entire QR path (for visual feedback)
     List<LatLng> pathPoints = [];
     for (int i = 0; i < qrPath.length - 1; i++) {
       LatLng startPos = LatLng(_qrData[qrPath[i]]['current_location'][0], _qrData[qrPath[i]]['current_location'][1]);
@@ -1288,7 +1271,13 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     int currentIndex = qrPath.indexOf(_lastDetectedQrId ?? qrPath[0]);
     if (currentIndex == -1) currentIndex = 0;
 
-    // Start listening to location updates
+    // Initial announcement for the first step
+    if (currentIndex < qrPath.length - 1) {
+      String nextQrId = qrPath[currentIndex + 1];
+      await _speak("Starting from ${_qrData[qrPath[currentIndex]]['name']}. Your next stop is ${_qrData[nextQrId]['name']}. Please proceed and scan the next QR code when you reach it.");
+    }
+
+    // Start listening to location updates and QR scans
     StreamSubscription<Position>? positionStream;
     DateTime lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5));
     double lastDistance = double.infinity;
@@ -1296,7 +1285,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     positionStream = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.high,
-        distanceFilter: 1, // Update every meter
+        distanceFilter: 1,
       ),
     ).listen((Position position) async {
       if (!_isNavigating) {
@@ -1307,9 +1296,15 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       _getCurrentLocation(position); // Update current position
       LatLng currentPos = LatLng(position.latitude, position.longitude);
 
+      if (currentIndex >= qrPath.length - 1) {
+        await _speak("You have reached your destination: ${_qrData[qrPath.last]['name']}.");
+        await _stopNavigation();
+        positionStream?.cancel();
+        return;
+      }
+
       String nextQrId = qrPath[currentIndex + 1];
       LatLng nextQrPos = LatLng(_qrData[nextQrId]['current_location'][0], _qrData[nextQrId]['current_location'][1]);
-
       double distanceToNextQr = Geolocator.distanceBetween(
         currentPos.latitude,
         currentPos.longitude,
@@ -1326,31 +1321,34 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           positionStream?.cancel();
           return;
         }
-        await _speak("QR code ${_qrData[nextQrId]['name']} scanned. Proceeding to next stop.");
-        lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5)); // Force next announcement
+        // Announce arrival and provide instructions to the next QR
+        String newNextQrId = qrPath[currentIndex + 1];
+        await _speak("You’ve reached ${_qrData[nextQrId]['name']}. Your next stop is ${_qrData[newNextQrId]['name']}.");
+        await _provideQrToQrInstructions(nextQrId, newNextQrId);
+        lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5)); // Reset for next step
         return;
       }
 
       // Check if user is too far off path
       if (distanceToNextQr > 150) {
         await _speak("You are ${distanceToNextQr.toStringAsFixed(0)} meters off the QR path. Switching to GPS navigation.");
-        await _flutterTts.stop(); // Stop any ongoing speech
-        _ttsQueue.clear(); // Clear queued speech
+        await _flutterTts.stop();
+        _ttsQueue.clear();
         positionStream?.cancel();
         await _fetchAndSpeakDirections(currentPos, _destination!);
         return;
       }
 
-      // Periodic distance updates (every 5 seconds or significant change)
+      // Periodic distance updates
       bool shouldAnnounce = DateTime.now().difference(lastAnnouncement) >= const Duration(seconds: 5) ||
           (lastDistance - distanceToNextQr).abs() > 10;
 
       if (shouldAnnounce && !_isTtsSpeaking) {
         String announcement;
         if (distanceToNextQr <= 10) {
-          announcement = "In ${distanceToNextQr.toStringAsFixed(0)} meters, scan the next QR code at ${_qrData[nextQrId]['name']}.";
+          announcement = "You are ${distanceToNextQr.toStringAsFixed(0)} meters from ${_qrData[nextQrId]['name']}. Please scan the QR code.";
         } else {
-          announcement = "You are ${distanceToNextQr.toStringAsFixed(0)} meters away from ${_qrData[nextQrId]['name']}. Head forward.";
+          announcement = "You are ${distanceToNextQr.toStringAsFixed(0)} meters from ${_qrData[nextQrId]['name']}. Head forward.";
         }
         await _speak(announcement);
         lastAnnouncement = DateTime.now();
@@ -1361,19 +1359,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       _speak("Error tracking your location. Please ensure GPS is enabled.");
     });
 
-    // Initial announcement
-    if (_currentPosition != null) {
-      LatLng currentPos = LatLng(_currentPosition!.latitude, _currentPosition!.longitude);
-      String nextQrId = qrPath[currentIndex + 1];
-      double initialDistance = Geolocator.distanceBetween(
-        currentPos.latitude,
-        currentPos.longitude,
-        _qrData[nextQrId]['current_location'][0],
-        _qrData[nextQrId]['current_location'][1],
-      );
-      await _speak("Starting from ${_qrData[qrPath[currentIndex]]['name']}. Your next stop is ${_qrData[nextQrId]['name']} in ${initialDistance.toStringAsFixed(0)} meters.");
-    }
-
     // Wait for navigation to complete or be interrupted
     await Future.doWhile(() async {
       await Future.delayed(const Duration(seconds: 1));
@@ -1381,6 +1366,21 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     });
 
     positionStream.cancel();
+  }
+
+  Future<void> _provideQrToQrInstructions(String currentQrId, String nextQrId) async {
+    LatLng currentPos = LatLng(_qrData[currentQrId]['current_location'][0], _qrData[currentQrId]['current_location'][1]);
+    LatLng nextPos = LatLng(_qrData[nextQrId]['current_location'][0], _qrData[nextQrId]['current_location'][1]);
+    var directionsResult = await getDirectionsWithSteps(currentPos, nextPos, apiKey);
+    List<String> steps = directionsResult['directions'];
+
+    await _speak("From ${_qrData[currentQrId]['name']} to ${_qrData[nextQrId]['name']}:");
+    for (int j = 0; j < steps.length && _isNavigating; j++) {
+      String refinedStep = _refineDirection(steps[j]);
+      await _speak("Step ${j + 1}: $refinedStep");
+      if (j < steps.length - 1) await _speak("next");
+    }
+    await _speak("Proceed and scan the QR code at ${_qrData[nextQrId]['name']} when you arrive.");
   }
 
   // ignore: unused_element: _waitForNextQrOrFallback
