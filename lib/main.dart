@@ -427,11 +427,13 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       _ttsQueue.add(text);
       return;
     }
-    _ttsQueue.add(text); // Add to queue without clearing
-    await _flutterTts.stop(); // Stop any ongoing speech first
+
+    _ttsQueue.add(text);
+    await _flutterTts.stop(); // Stop any ongoing speech
     if (_isTtsSpeaking) {
       _isTtsSpeaking = false; // Force reset if stuck
     }
+
     while (_ttsQueue.isNotEmpty) {
       _isTtsSpeaking = true;
       String next = _ttsQueue.removeFirst();
@@ -442,7 +444,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       await _flutterTts.speak(next);
       await completer.future.catchError((e) {
         print("TTS error: $e");
-        completer.complete(); // Ensure completion even on error
+        completer.complete();
       });
       await Future.delayed(const Duration(milliseconds: 300));
     }
@@ -537,7 +539,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
   Future<void> _fetchDistance() async {
     try {
-      final response = await http.get(Uri.parse('http://192.168.134.92:5000/data'));
+      final response = await http.get(Uri.parse('http://192.168.46.92:5000/data'));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         double newDistance = data['distance_cm'];
@@ -839,6 +841,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
   void _provideContextualInfo(Position position) {
     const double proximityThreshold = 30;
+    // Skip if TTS is speaking to avoid overlap with navigation announcements
+    if (_isTtsSpeaking) return;
+
     _qrData.forEach((qrId, qrInfo) {
       LatLng qrPosition = LatLng(qrInfo['current_location'][0], qrInfo['current_location'][1]);
       double distanceToQr = Geolocator.distanceBetween(
@@ -1285,7 +1290,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
     // Start listening to location updates
     StreamSubscription<Position>? positionStream;
-    DateTime lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5)); // Ensure first announcement is immediate
+    DateTime lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5));
     double lastDistance = double.infinity;
 
     positionStream = Geolocator.getPositionStream(
@@ -1312,8 +1317,8 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         nextQrPos.longitude,
       );
 
-      // Check if user has reached the next QR code
-      if (_lastDetectedQrId == nextQrId || distanceToNextQr < 5) {
+      // Check if user has scanned the next QR code
+      if (_lastDetectedQrId == nextQrId) {
         currentIndex++;
         if (currentIndex >= qrPath.length - 1) {
           await _speak("You have reached your destination: ${_qrData[qrPath.last]['name']}.");
@@ -1321,7 +1326,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           positionStream?.cancel();
           return;
         }
-        await _speak("QR code ${_qrData[nextQrId]['name']} detected. Proceeding to next stop.");
+        await _speak("QR code ${_qrData[nextQrId]['name']} scanned. Proceeding to next stop.");
         lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5)); // Force next announcement
         return;
       }
@@ -1329,14 +1334,16 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       // Check if user is too far off path
       if (distanceToNextQr > 150) {
         await _speak("You are ${distanceToNextQr.toStringAsFixed(0)} meters off the QR path. Switching to GPS navigation.");
-        await _fetchAndSpeakDirections(currentPos, _destination!);
+        await _flutterTts.stop(); // Stop any ongoing speech
+        _ttsQueue.clear(); // Clear queued speech
         positionStream?.cancel();
+        await _fetchAndSpeakDirections(currentPos, _destination!);
         return;
       }
 
       // Periodic distance updates (every 5 seconds or significant change)
       bool shouldAnnounce = DateTime.now().difference(lastAnnouncement) >= const Duration(seconds: 5) ||
-          (lastDistance - distanceToNextQr).abs() > 10; // Announce if distance changes by 10m
+          (lastDistance - distanceToNextQr).abs() > 10;
 
       if (shouldAnnounce && !_isTtsSpeaking) {
         String announcement;
@@ -1624,7 +1631,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                   Positioned.fill(
                     child: Opacity(
                       opacity: 0.7,
-                      child: Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+                      child: Image.asset('assets/map.png', fit: BoxFit.cover),
                     ),
                   ),
                   Center(
@@ -1690,7 +1697,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
               ),
             ),
           ),
-          Positioned(
+          /*Positioned(
             top: 720,
             left: 16,
             right: 16,
@@ -1706,7 +1713,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                 textAlign: TextAlign.center,
               ),
             ),
-          ),
+          ),*/ //removed this for the time being because the need for text bar is low
           Positioned(
             bottom: 5,
             left: 16,
