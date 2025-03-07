@@ -14,25 +14,69 @@ import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:provider/provider.dart'; // Added for ChangeNotifierProvider
+import 'package:flutter/foundation.dart'; // Added for ChangeNotifier
 import 'admin_panel.dart';
 import 'config.dart';
 
 // Global notifier for QR data changes
 final ValueNotifier<bool> qrDataChangedNotifier = ValueNotifier(false);
 
-class ThemeProvider {
+class ThemeProvider extends ChangeNotifier { // Updated to ChangeNotifier
   bool _isDarkMode = false;
+  double _distanceThreshold = 75.0;
+  double _speechRate = 0.5; // New: Default speech rate
+  int _vibrationDuration = 500; // New: Default vibration duration in ms
+  int _announcementInterval = 5; // New: Default interval in seconds
+
   bool get isDarkMode => _isDarkMode;
+  double get distanceThreshold => _distanceThreshold;
+  double get speechRate => _speechRate; // New
+  int get vibrationDuration => _vibrationDuration; // New
+  int get announcementInterval => _announcementInterval; // New
 
   Future<void> loadTheme() async {
     final prefs = await SharedPreferences.getInstance();
     _isDarkMode = prefs.getBool('isDarkMode') ?? false;
+    _distanceThreshold = prefs.getDouble('distanceThreshold') ?? 75.0;
+    _speechRate = prefs.getDouble('speechRate') ?? 0.5; // New
+    _vibrationDuration = prefs.getInt('vibrationDuration') ?? 500; // New
+    _announcementInterval = prefs.getInt('announcementInterval') ?? 5; // New
   }
 
   Future<void> toggleTheme() async {
     _isDarkMode = !_isDarkMode;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('isDarkMode', _isDarkMode);
+    notifyListeners(); // Added to notify UI of theme change
+  }
+
+  Future<void> setDistanceThreshold(double value) async {
+    _distanceThreshold = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('distanceThreshold', _distanceThreshold);
+    notifyListeners(); // Added
+  }
+
+  Future<void> setSpeechRate(double value) async { // New
+    _speechRate = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('speechRate', _speechRate);
+    notifyListeners();
+  }
+
+  Future<void> setVibrationDuration(int value) async { // New
+    _vibrationDuration = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('vibrationDuration', _vibrationDuration);
+    notifyListeners();
+  }
+
+  Future<void> setAnnouncementInterval(int value) async { // New
+    _announcementInterval = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('announcementInterval', _announcementInterval);
+    notifyListeners();
   }
 }
 
@@ -40,26 +84,29 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final themeProvider = ThemeProvider();
   await themeProvider.loadTheme();
-  runApp(MyApp(themeProvider: themeProvider));
+  runApp(
+    ChangeNotifierProvider( // Updated to use Provider
+      create: (_) => themeProvider,
+      child: const MyApp(),
+    ),
+  );
 }
 
-class MyApp extends StatefulWidget {
-  final ThemeProvider themeProvider;
-  const MyApp({super.key, required this.themeProvider});
+class MyApp extends StatelessWidget { // Updated to StatelessWidget and removed themeProvider parameter
+  const MyApp({super.key});
 
-  @override
-  State<MyApp> createState() => _MyAppState();
-}
-
-class _MyAppState extends State<MyApp> {
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.light(),
-      darkTheme: ThemeData.dark(),
-      themeMode: widget.themeProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
-      home: BlindNavigationApp(themeProvider: widget.themeProvider),
+    return Consumer<ThemeProvider>( // Updated to use Consumer
+      builder: (context, themeProvider, child) {
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData.light(),
+          darkTheme: ThemeData.dark(),
+          themeMode: themeProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
+          home: const BlindNavigationApp(), // Updated to remove themeProvider parameter
+        );
+      },
     );
   }
 }
@@ -72,8 +119,7 @@ class Landmark {
 }
 
 class BlindNavigationApp extends StatefulWidget {
-  final ThemeProvider themeProvider;
-  const BlindNavigationApp({super.key, required this.themeProvider});
+  const BlindNavigationApp({super.key}); // Updated to remove themeProvider parameter
 
   @override
   State<BlindNavigationApp> createState() => _BlindNavigationAppState();
@@ -130,13 +176,13 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   }
 
   Future<void> _initializeApp() async {
-    await _initializeTts(); // Ensure TTS is fully initialized first
-    await Future.delayed(const Duration(milliseconds: 500)); // Add delay for TTS engine readiness
+    await _initializeTts();
+    await Future.delayed(const Duration(milliseconds: 500));
     _addMarkers();
     await _loadQrData();
     _startLocationUpdates();
     _startDistanceUpdates();
-    await _initializeSpeech(); // Speech initialization after TTS
+    await _initializeSpeech();
     _setCustomMarkers().then((_) {
       _addMarkers();
     });
@@ -148,7 +194,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
   Future<void> _initializeTts() async {
     await _flutterTts.setLanguage("en-US");
-    await _flutterTts.setSpeechRate(0.5);
+    await _flutterTts.setSpeechRate(Provider.of<ThemeProvider>(context, listen: false).speechRate); // Updated to use dynamic speech rate
     await _flutterTts.setVolume(1.0);
     await _flutterTts.setPitch(1.0);
     _ttsInitialized = true;
@@ -168,7 +214,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       );
       print("Speech initialized: $_speechInitialized");
       if (_speechInitialized) {
-        await _startVoiceInteraction(); // Trigger initial prompt on app start
+        await _startVoiceInteraction();
       } else {
         await _speak("Speech recognition could not be initialized.");
       }
@@ -209,7 +255,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     if (normalizedResponse == "yes" && _currentPosition != null && _destination != null) {
       await _speak("Switching to GPS navigation.");
       setState(() {
-        _destinationQrId = null; // Disable QR navigation
+        _destinationQrId = null;
       });
       await _fetchAndSpeakDirections(
         LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
@@ -264,7 +310,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         _stopListening();
         await Future.delayed(const Duration(milliseconds: 200));
       }
-      // Force initial prompt on first call or if not navigating/awaiting
       if (!_isNavigating && !_awaitingDestination) {
         await _speak("How may I help you?");
         await Future.delayed(const Duration(milliseconds: 300));
@@ -380,7 +425,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (_detectedObjects.isNotEmpty) {
         String objectsText = "In front of you: ${_detectedObjects.join(", ")}";
         await _speak(objectsText);
-      } else if (_distanceFromSensor != null && _distanceFromSensor! < 75) {
+      } else if (_distanceFromSensor != null && _distanceFromSensor! < Provider.of<ThemeProvider>(context, listen: false).distanceThreshold) { // Updated
         await _speak("An obstacle is in front of you, but no specific objects detected.");
       } else {
         await _speak("No objects detected in front of you right now.");
@@ -494,9 +539,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     }
 
     _ttsQueue.add(text);
-    await _flutterTts.stop(); // Stop any ongoing speech
+    await _flutterTts.stop();
     if (_isTtsSpeaking) {
-      _isTtsSpeaking = false; // Force reset if stuck
+      _isTtsSpeaking = false;
     }
 
     while (_ttsQueue.isNotEmpty) {
@@ -615,23 +660,20 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           _detectedObjects = newDetectedObjects;
         });
 
-        bool isBelowThreshold = _distanceFromSensor != null && _distanceFromSensor! < 75;
+        final themeProvider = Provider.of<ThemeProvider>(context, listen: false); // Updated
+        bool isBelowThreshold = _distanceFromSensor != null && _distanceFromSensor! < themeProvider.distanceThreshold;
 
-        // Continuous vibration while below threshold
         if (isBelowThreshold && await Vibration.hasVibrator()) {
-          Vibration.vibrate(duration: 500);
+          Vibration.vibrate(duration: themeProvider.vibrationDuration); // Updated to use dynamic duration
         }
 
-        // TTS announcement logic
         if (isBelowThreshold && !_isTtsSpeaking) {
           bool shouldAnnounce = false;
           if (!_lastAnnouncedBelowThreshold) {
-            // Initial announcement when threshold is first crossed
             shouldAnnounce = true;
             _lastAnnouncedBelowThreshold = true;
           } else if (_lastObjectAnnouncementTime != null &&
-              DateTime.now().difference(_lastObjectAnnouncementTime!).inSeconds >= 5) {
-            // Periodic announcement every 5 seconds
+              DateTime.now().difference(_lastObjectAnnouncementTime!).inSeconds >= themeProvider.announcementInterval) { // Updated to use dynamic interval
             shouldAnnounce = true;
           }
 
@@ -642,10 +684,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
             } else {
               _speak("An obstacle is in front of you, but no specific objects detected.");
             }
-            _lastObjectAnnouncementTime = DateTime.now(); // Update timestamp
+            _lastObjectAnnouncementTime = DateTime.now();
           }
         } else if (!isBelowThreshold && _lastAnnouncedBelowThreshold) {
-          // Reset flag when distance goes above threshold
           _lastAnnouncedBelowThreshold = false;
         }
 
@@ -742,7 +783,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         if (path.length > 1) {
           String nextQr = path[1];
           await _speak("You are on the correct path. Next stop: ${_qrData[nextQr]['name']}.");
-          // Instructions will be provided in _navigateThroughQrPath when scanned
         } else {
           await _speak("You have reached your destination.");
           await _stopNavigation();
@@ -851,7 +891,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         position.latitude,
         position.longitude,
       );
-      if (distanceMoved < 2) return; // Existing check
+      if (distanceMoved < 2) return;
     }
 
     setState(() {
@@ -863,7 +903,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     }
 
     if (_destination != null && _isNavigating && _destinationQrId == null) {
-      // Debounce direction fetching
       if (DateTime.now().difference(_lastDirectionFetch) > _debounceDuration) {
         _fetchAndSpeakDirections(
           LatLng(position.latitude, position.longitude),
@@ -935,7 +974,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
   void _provideContextualInfo(Position position) {
     const double proximityThreshold = 30;
-    // Skip if TTS is speaking to avoid overlap with navigation announcements
     if (_isTtsSpeaking) return;
 
     _qrData.forEach((qrId, qrInfo) {
@@ -1019,7 +1057,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         ));
       });
 
-      // Only speak if TTS is not currently speaking
       if (!_isTtsSpeaking) {
         await _speak("Here are your GPS directions:");
       }
@@ -1031,7 +1068,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       for (int i = 0; i < importantDirections.length && _isNavigating; i++) {
         String refinedText = _refineDirection(importantDirections[i]);
         print("Refined Text: $refinedText");
-        if (!_isTtsSpeaking) { // Avoid interrupting ongoing speech
+        if (!_isTtsSpeaking) {
           await _speak(refinedText);
           if (i < importantDirections.length - 1 && _isNavigating) {
             await _speak("next");
@@ -1066,7 +1103,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           );
         }
 
-        if (!_isTtsSpeaking) { // Only speak if TTS is idle
+        if (!_isTtsSpeaking) {
           if (distanceToNextStep < 20 || currentStepIndex == 0) {
             await _speak("Now, $refinedStep");
             currentStepIndex++;
@@ -1126,9 +1163,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   Future<void> _stopNavigation() async {
     if (_isNavigating) {
       _isNavigating = false;
-      await _flutterTts.stop(); // Stop any ongoing TTS
-      _ttsQueue.clear(); // Clear all queued messages
-      _isTtsSpeaking = false; // Reset speaking flag to force next speak
+      await _flutterTts.stop();
+      _ttsQueue.clear();
+      _isTtsSpeaking = false;
       setState(() {
         _polylines.clear();
         _markers.removeWhere((marker) => marker.markerId.value == 'destination');
@@ -1137,7 +1174,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         _directionsCache.clear();
         _polylinePoints.clear();
       });
-      await _speak("Navigation has been stopped."); // Force this to play immediately
+      await _speak("Navigation has been stopped.");
       print("Navigation stopped.");
     }
   }
@@ -1281,9 +1318,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         await _speak("Starting QR navigation from ${_qrData[startQrId]['name']} to ${_qrData[qrId]['name']}.");
         List<String> qrPath = findShortestPath(startQrId!, qrId);
         if (qrPath.isNotEmpty) {
-          // Announce the full path upfront (as you like this)
           await _announceQrPath(qrPath);
-          // Start step-by-step navigation without immediate full instructions
           await _navigateThroughQrPath(qrPath);
         } else {
           await _speak("No direct QR path found from ${_qrData[startQrId]['name']} to ${_qrData[qrId]['name']}. Switching to GPS navigation.");
@@ -1331,7 +1366,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       return;
     }
 
-    // Build the polyline for the entire QR path (for visual feedback)
     List<LatLng> pathPoints = [];
     for (int i = 0; i < qrPath.length - 1; i++) {
       LatLng startPos = LatLng(_qrData[qrPath[i]]['current_location'][0], _qrData[qrPath[i]]['current_location'][1]);
@@ -1364,13 +1398,11 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     int currentIndex = qrPath.indexOf(_lastDetectedQrId ?? qrPath[0]);
     if (currentIndex == -1) currentIndex = 0;
 
-    // Initial announcement for the first step
     if (currentIndex < qrPath.length - 1) {
       String nextQrId = qrPath[currentIndex + 1];
       await _speak("Starting from ${_qrData[qrPath[currentIndex]]['name']}. Your next stop is ${_qrData[nextQrId]['name']}. Please proceed and scan the next QR code when you reach it.");
     }
 
-    // Start listening to location updates and QR scans
     StreamSubscription<Position>? positionStream;
     DateTime lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5));
     double lastDistance = double.infinity;
@@ -1386,7 +1418,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         return;
       }
 
-      _getCurrentLocation(position); // Update current position
+      _getCurrentLocation(position);
       LatLng currentPos = LatLng(position.latitude, position.longitude);
 
       if (currentIndex >= qrPath.length - 1) {
@@ -1405,7 +1437,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         nextQrPos.longitude,
       );
 
-      // Check if user has scanned the next QR code
       if (_lastDetectedQrId == nextQrId) {
         currentIndex++;
         if (currentIndex >= qrPath.length - 1) {
@@ -1414,15 +1445,13 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           positionStream?.cancel();
           return;
         }
-        // Announce arrival and provide instructions to the next QR
         String newNextQrId = qrPath[currentIndex + 1];
         await _speak("You’ve reached ${_qrData[nextQrId]['name']}. Your next stop is ${_qrData[newNextQrId]['name']}.");
         await _provideQrToQrInstructions(nextQrId, newNextQrId);
-        lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5)); // Reset for next step
+        lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5));
         return;
       }
 
-      // Check if user is too far off path
       if (distanceToNextQr > 150) {
         await _speak("You are ${distanceToNextQr.toStringAsFixed(0)} meters off the QR path. Switching to GPS navigation.");
         await _flutterTts.stop();
@@ -1432,7 +1461,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         return;
       }
 
-      // Periodic distance updates
       bool shouldAnnounce = DateTime.now().difference(lastAnnouncement) >= const Duration(seconds: 5) ||
           (lastDistance - distanceToNextQr).abs() > 10;
 
@@ -1452,7 +1480,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       _speak("Error tracking your location. Please ensure GPS is enabled.");
     });
 
-    // Wait for navigation to complete or be interrupted
     await Future.doWhile(() async {
       await Future.delayed(const Duration(seconds: 1));
       return _isNavigating;
@@ -1474,48 +1501,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (j < steps.length - 1) await _speak("next");
     }
     await _speak("Proceed and scan the QR code at ${_qrData[nextQrId]['name']} when you arrive.");
-  }
-
-  // ignore: unused_element: _waitForNextQrOrFallback
-  Future<void> _waitForNextQrOrFallback(String expectedQrId, LatLng nextQrPos) async {
-    const timeout = Duration(seconds: 120);
-    DateTime startTime = DateTime.now();
-
-    while (_isNavigating && _lastDetectedQrId != expectedQrId) {
-      if (_currentPosition != null) {
-        double distanceToNextQr = Geolocator.distanceBetween(
-          _currentPosition!.latitude,
-          _currentPosition!.longitude,
-          nextQrPos.latitude,
-          nextQrPos.longitude,
-        );
-        if (distanceToNextQr > 150) {
-          await _speak("You are off the QR path by ${distanceToNextQr.toStringAsFixed(0)} meters. Switching to GPS navigation.");
-          await _fetchAndSpeakDirections(
-            LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-            _destination!,
-          );
-          return;
-        }
-      }
-
-      if (DateTime.now().difference(startTime) > timeout) {
-        await _speak("No QR detected for 2 minutes. Please scan ${_qrData[expectedQrId]['name']} or I’ll switch to GPS.");
-        startTime = DateTime.now();
-        await Future.delayed(const Duration(seconds: 10));
-        if (_lastDetectedQrId != expectedQrId && _isNavigating) {
-          await _fetchAndSpeakDirections(
-            _currentPosition != null
-                ? LatLng(_currentPosition!.latitude, _currentPosition!.longitude)
-                : nextQrPos,
-            _destination!,
-          );
-          return;
-        }
-      }
-
-      await Future.delayed(const Duration(seconds: 1));
-    }
   }
 
   Future<void> _reloadQrData() async {
@@ -1649,38 +1634,39 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       case 'Admin Panel':
         Navigator.of(context).push(
           MaterialPageRoute(
-            builder: (context) => AdminPanelScreen(themeProvider: widget.themeProvider),
+            builder: (context) => AdminPanelScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)), // Updated
           ),
         );
         break;
       case 'Settings':
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (context) => SettingsScreen(themeProvider: widget.themeProvider),
+          builder: (context) => SettingsScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)), // Updated
         ));
         break;
       case 'Help':
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (context) => HelpScreen(themeProvider: widget.themeProvider),
+          builder: (context) => HelpScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)), // Updated
         ));
         break;
       case 'About':
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (context) => AboutScreen(themeProvider: widget.themeProvider),
+          builder: (context) => AboutScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)), // Updated
         ));
         break;
     }
   }
 
   Widget _buildDrawerItem(String title, IconData icon) {
+    final themeProvider = Provider.of<ThemeProvider>(context, listen: false); // Updated
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
       leading: Icon(
         icon,
-        color: widget.themeProvider.isDarkMode ? Colors.white : Colors.blue,
+        color: themeProvider.isDarkMode ? Colors.white : Colors.blue,
       ),
       title: Text(
         title,
-        style: TextStyle(color: widget.themeProvider.isDarkMode ? Colors.white : Colors.black),
+        style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
       ),
       onTap: () => _onDrawerItemTap(title),
     );
@@ -1688,13 +1674,14 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
   @override
   Widget build(BuildContext context) {
+    final themeProvider = Provider.of<ThemeProvider>(context);
     return Scaffold(
       appBar: AppBar(
         title: const Text(
           'Blind Navigation App',
           style: TextStyle(color: Colors.black87),
         ),
-        backgroundColor: widget.themeProvider.isDarkMode ? Colors.black87 : Colors.blue,
+        backgroundColor: themeProvider.isDarkMode ? Colors.black87 : Colors.blue,
         actions: [
           IconButton(
             icon: const Icon(Icons.map),
@@ -1716,7 +1703,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           children: [
             DrawerHeader(
               decoration: BoxDecoration(
-                color: widget.themeProvider.isDarkMode ? Colors.black : Colors.blue,
+                color: themeProvider.isDarkMode ? Colors.black : Colors.blue,
               ),
               child: Stack(
                 fit: StackFit.expand,
@@ -1790,23 +1777,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
               ),
             ),
           ),
-          /*Positioned(
-            top: 720,
-            left: 16,
-            right: 16,
-            child: Container(
-              padding: const EdgeInsets.all(8.0),
-              decoration: BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                _recognizedText,
-                style: const TextStyle(color: Colors.white, fontSize: 16),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          ),*/ //removed this for the time being because the need for text bar is low
           Positioned(
             bottom: 5,
             left: 16,
@@ -1814,7 +1784,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
             child: Container(
               padding: const EdgeInsets.all(12.0),
               decoration: BoxDecoration(
-                color: widget.themeProvider.isDarkMode ? Colors.black54 : Colors.black54,
+                color: themeProvider.isDarkMode ? Colors.black54 : Colors.black54,
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
@@ -1832,7 +1802,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                             style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
-                              color: widget.themeProvider.isDarkMode ? Colors.white70 : Colors.white,
+                              color: themeProvider.isDarkMode ? Colors.white70 : Colors.white,
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -1841,7 +1811,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                             style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
-                              color: widget.themeProvider.isDarkMode ? Colors.white70 : Colors.white,
+                              color: themeProvider.isDarkMode ? Colors.white70 : Colors.white,
                             ),
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -1857,12 +1827,18 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                               style: TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.bold,
-                                color: widget.themeProvider.isDarkMode ? Colors.white70 : Colors.white,
+                                color: themeProvider.isDarkMode ? Colors.white70 : Colors.white,
                               ),
                             ),
                             const SizedBox(height: 4),
-                            const Text("Type: TripuraUni", style: TextStyle(fontSize: 14, color: Colors.white)),
-                            Text("ID: $_lastDetectedQrId", style: const TextStyle(fontSize: 14, color: Colors.white)),
+                            Text(
+                              _qrData[_lastDetectedQrId]['name'],
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: themeProvider.isDarkMode ? Colors.white70 : Colors.white,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ],
                         ),
                     ],
@@ -1878,7 +1854,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                             style: TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.bold,
-                              color: widget.themeProvider.isDarkMode ? Colors.white70 : Colors.white,
+                              color: themeProvider.isDarkMode ? Colors.white70 : Colors.white,
                             ),
                           ),
                           const SizedBox(height: 4),
@@ -1891,7 +1867,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                                 label: Text(
                                   obj,
                                   style: TextStyle(
-                                    color: widget.themeProvider.isDarkMode ? Colors.white70 : Colors.white,
+                                    color: themeProvider.isDarkMode ? Colors.white70 : Colors.white,
                                     fontSize: 14,
                                   ),
                                 ),
@@ -1905,6 +1881,18 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                       ),
                     ),
                   ],
+                  if (_isListening)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8.0),
+                      child: Text(
+                        "Listening: $_recognizedText",
+                        style: const TextStyle(
+                          fontSize: 16,
+                          color: Colors.greenAccent,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -2095,71 +2083,129 @@ class QRLocationScreen extends StatelessWidget {
 
 class SettingsScreen extends StatefulWidget {
   final ThemeProvider themeProvider;
+
   const SettingsScreen({super.key, required this.themeProvider});
 
   @override
-  _SettingsScreenState createState() => _SettingsScreenState();
+  State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  late double _distanceThreshold;
+  late double _speechRate;
+  late int _vibrationDuration;
+  late int _announcementInterval;
+
+  @override
+  void initState() {
+    super.initState();
+    _distanceThreshold = widget.themeProvider.distanceThreshold;
+    _speechRate = widget.themeProvider.speechRate;
+    _vibrationDuration = widget.themeProvider.vibrationDuration;
+    _announcementInterval = widget.themeProvider.announcementInterval;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final themeProvider = widget.themeProvider;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Settings'),
-        backgroundColor: Theme.of(context).brightness == Brightness.dark ? Colors.black87 : Colors.blue,
+        backgroundColor: themeProvider.isDarkMode ? Colors.black87 : Colors.blue,
       ),
-      body: SingleChildScrollView(
+      body: Padding(
         padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: ListView(
           children: [
-            Text(
-              'Customize Your Experience',
-              style: TextStyle(
-                fontSize: 26,
-                fontWeight: FontWeight.bold,
-                color: Theme.of(context).brightness == Brightness.dark ? Colors.white : Colors.blue,
+            SwitchListTile(
+              title: Text(
+                'Dark Mode',
+                style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
               ),
+              value: themeProvider.isDarkMode,
+              onChanged: (value) {
+                themeProvider.toggleTheme();
+              },
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 20),
             Text(
-              'Adjust settings to suit your preferences.',
-              style: TextStyle(
-                fontSize: 16,
-                color: Theme.of(context).brightness == Brightness.dark ? Colors.white70 : Colors.black87,
-              ),
+              'Distance Threshold (cm): ${_distanceThreshold.toStringAsFixed(1)}',
+              style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
             ),
-            const SizedBox(height: 24),
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8.0),
-              child: ListTile(
-                leading: Icon(
-                  Icons.dark_mode,
-                  color: Theme.of(context).brightness == Brightness.dark ? Colors.white70 : Colors.blue,
-                  size: 28,
-                ),
-                title: Text(
-                  'Dark Mode',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                    color: Theme.of(context).brightness == Brightness.dark ? Colors.white : Colors.black87,
-                  ),
-                ),
-                trailing: Switch(
-                  value: widget.themeProvider.isDarkMode,
-                  onChanged: (value) async {
-                    await widget.themeProvider.toggleTheme();
-                    setState(() {});
-                  },
-                  activeColor: Colors.blue,
-                ),
-                tileColor: Theme.of(context).brightness == Brightness.dark ? Colors.grey[800] : Colors.grey[100],
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
+            Slider(
+              value: _distanceThreshold,
+              min: 10.0,
+              max: 200.0,
+              divisions: 190,
+              label: _distanceThreshold.toStringAsFixed(1),
+              onChanged: (value) {
+                setState(() {
+                  _distanceThreshold = value;
+                });
+              },
+              onChangeEnd: (value) {
+                themeProvider.setDistanceThreshold(value);
+              },
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Speech Rate: ${_speechRate.toStringAsFixed(2)}',
+              style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
+            ),
+            Slider(
+              value: _speechRate,
+              min: 0.1,
+              max: 1.0,
+              divisions: 9,
+              label: _speechRate.toStringAsFixed(2),
+              onChanged: (value) {
+                setState(() {
+                  _speechRate = value;
+                });
+              },
+              onChangeEnd: (value) {
+                themeProvider.setSpeechRate(value);
+              },
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Vibration Duration (ms): $_vibrationDuration',
+              style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
+            ),
+            Slider(
+              value: _vibrationDuration.toDouble(),
+              min: 100,
+              max: 1000,
+              divisions: 9,
+              label: _vibrationDuration.toString(),
+              onChanged: (value) {
+                setState(() {
+                  _vibrationDuration = value.toInt();
+                });
+              },
+              onChangeEnd: (value) {
+                themeProvider.setVibrationDuration(value.toInt());
+              },
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Announcement Interval (s): $_announcementInterval',
+              style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
+            ),
+            Slider(
+              value: _announcementInterval.toDouble(),
+              min: 1,
+              max: 10,
+              divisions: 9,
+              label: _announcementInterval.toString(),
+              onChanged: (value) {
+                setState(() {
+                  _announcementInterval = value.toInt();
+                });
+              },
+              onChangeEnd: (value) {
+                themeProvider.setAnnouncementInterval(value.toInt());
+              },
             ),
           ],
         ),

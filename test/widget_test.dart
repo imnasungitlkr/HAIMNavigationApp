@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:HAIM_Navigation/main.dart'; // Updated to match your package name
+import 'package:HAIM_Navigation/main.dart'; // Ensure this matches your package name
 import 'package:shared_preferences/shared_preferences.dart'; // For mocking SharedPreferences
+import 'package:provider/provider.dart'; // Import provider package for ChangeNotifierProvider
 
 void main() {
   // Setup mock for SharedPreferences before all tests
@@ -15,8 +16,13 @@ void main() {
     final themeProvider = ThemeProvider();
     await themeProvider.loadTheme(); // Load theme preferences from mock
 
-    // Build the app and trigger a frame
-    await tester.pumpWidget(MyApp(themeProvider: themeProvider));
+    // Build the app with ChangeNotifierProvider and trigger a frame
+    await tester.pumpWidget(
+      ChangeNotifierProvider(
+        create: (_) => themeProvider,
+        child: const MyApp(),
+      ),
+    );
     await tester.pumpAndSettle(); // Wait for all async operations to complete
 
     // Verify that the app bar title is present
