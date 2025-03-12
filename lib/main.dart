@@ -14,65 +14,66 @@ import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:provider/provider.dart'; // Added for ChangeNotifierProvider
-import 'package:flutter/foundation.dart'; // Added for ChangeNotifier
+import 'package:provider/provider.dart';
+import 'package:flutter/foundation.dart';
+import 'package:porcupine_flutter/porcupine_manager.dart'; // Added for Porcupine
 import 'admin_panel.dart';
 import 'config.dart';
 
 // Global notifier for QR data changes
 final ValueNotifier<bool> qrDataChangedNotifier = ValueNotifier(false);
 
-class ThemeProvider extends ChangeNotifier { // Updated to ChangeNotifier
+class ThemeProvider extends ChangeNotifier {
   bool _isDarkMode = false;
   double _distanceThreshold = 75.0;
-  double _speechRate = 0.5; // New: Default speech rate
-  int _vibrationDuration = 500; // New: Default vibration duration in ms
-  int _announcementInterval = 5; // New: Default interval in seconds
+  double _speechRate = 0.5;
+  int _vibrationDuration = 500;
+  int _announcementInterval = 5;
 
   bool get isDarkMode => _isDarkMode;
   double get distanceThreshold => _distanceThreshold;
-  double get speechRate => _speechRate; // New
-  int get vibrationDuration => _vibrationDuration; // New
-  int get announcementInterval => _announcementInterval; // New
+  double get speechRate => _speechRate;
+  int get vibrationDuration => _vibrationDuration;
+  int get announcementInterval => _announcementInterval;
 
   Future<void> loadTheme() async {
     final prefs = await SharedPreferences.getInstance();
     _isDarkMode = prefs.getBool('isDarkMode') ?? false;
     _distanceThreshold = prefs.getDouble('distanceThreshold') ?? 75.0;
-    _speechRate = prefs.getDouble('speechRate') ?? 0.5; // New
-    _vibrationDuration = prefs.getInt('vibrationDuration') ?? 500; // New
-    _announcementInterval = prefs.getInt('announcementInterval') ?? 5; // New
+    _speechRate = prefs.getDouble('speechRate') ?? 0.5;
+    _vibrationDuration = prefs.getInt('vibrationDuration') ?? 500;
+    _announcementInterval = prefs.getInt('announcementInterval') ?? 5;
   }
 
   Future<void> toggleTheme() async {
     _isDarkMode = !_isDarkMode;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('isDarkMode', _isDarkMode);
-    notifyListeners(); // Added to notify UI of theme change
+    notifyListeners();
   }
 
   Future<void> setDistanceThreshold(double value) async {
     _distanceThreshold = value;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble('distanceThreshold', _distanceThreshold);
-    notifyListeners(); // Added
+    notifyListeners();
   }
 
-  Future<void> setSpeechRate(double value) async { // New
+  Future<void> setSpeechRate(double value) async {
     _speechRate = value;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble('speechRate', _speechRate);
     notifyListeners();
   }
 
-  Future<void> setVibrationDuration(int value) async { // New
+  Future<void> setVibrationDuration(int value) async {
     _vibrationDuration = value;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('vibrationDuration', _vibrationDuration);
     notifyListeners();
   }
 
-  Future<void> setAnnouncementInterval(int value) async { // New
+  Future<void> setAnnouncementInterval(int value) async {
     _announcementInterval = value;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('announcementInterval', _announcementInterval);
@@ -85,26 +86,26 @@ void main() async {
   final themeProvider = ThemeProvider();
   await themeProvider.loadTheme();
   runApp(
-    ChangeNotifierProvider( // Updated to use Provider
+    ChangeNotifierProvider(
       create: (_) => themeProvider,
       child: const MyApp(),
     ),
   );
 }
 
-class MyApp extends StatelessWidget { // Updated to StatelessWidget and removed themeProvider parameter
+class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ThemeProvider>( // Updated to use Consumer
+    return Consumer<ThemeProvider>(
       builder: (context, themeProvider, child) {
         return MaterialApp(
           debugShowCheckedModeBanner: false,
           theme: ThemeData.light(),
           darkTheme: ThemeData.dark(),
           themeMode: themeProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
-          home: const BlindNavigationApp(), // Updated to remove themeProvider parameter
+          home: const BlindNavigationApp(),
         );
       },
     );
@@ -119,7 +120,7 @@ class Landmark {
 }
 
 class BlindNavigationApp extends StatefulWidget {
-  const BlindNavigationApp({super.key}); // Updated to remove themeProvider parameter
+  const BlindNavigationApp({super.key});
 
   @override
   State<BlindNavigationApp> createState() => _BlindNavigationAppState();
@@ -166,6 +167,8 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   bool _awaitingGpsSwitchResponse = false;
   bool _lastAnnouncedBelowThreshold = false;
   DateTime? _lastObjectAnnouncementTime;
+  PorcupineManager? _porcupineManager;
+  bool _isPorcupineActive = false;
 
   final List<Landmark> landmarks = [];
 
@@ -176,25 +179,63 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   }
 
   Future<void> _initializeApp() async {
+    // Step 1: Initialize TTS and speak welcome message
     await _initializeTts();
-    await Future.delayed(const Duration(milliseconds: 500));
-    _addMarkers();
+    await _speak("Welcome to the Blind Navigation App. Say 'Hey Coco' or press the microphone button to begin.");
+
+    // Step 2: Load QR data and other setup
     await _loadQrData();
+    await _setCustomMarkers();
+    _addMarkers();
     _startLocationUpdates();
     _startDistanceUpdates();
+
+    // Step 4: Initialize Porcupine for wake word detection
+    await _initializePorcupine();
+
+    // Step 5: Initialize speech recognition without starting it
     await _initializeSpeech();
-    _setCustomMarkers().then((_) {
-      _addMarkers();
-    });
+
     _flutterTts.setCompletionHandler(() {
       print("TTS Speech Completed");
     });
     qrDataChangedNotifier.addListener(_reloadQrData);
   }
 
+  // Initialize Porcupine for wake word detection
+  Future<void> _initializePorcupine() async {
+    try {
+      _porcupineManager = await PorcupineManager.fromKeywordPaths(
+        "Qnnu3bA14a9UGVobL6nPBymyFcoSsFiftpXqWrhMlG7q46zwavpabw==",
+        ["assets/hey-coco_en_android_v3_0_0.ppn"],
+            (int keywordIndex) {
+          if (keywordIndex == 0) { // "Hey Coco" detected
+            print("Wake word 'Hey Coco' detected");
+            _handleWakeWordDetection(); // New handler for wake word
+          }
+        },
+      );
+      await _porcupineManager?.start();
+      _isPorcupineActive = true;
+      print("Porcupine wake word detection started");
+    } catch (e) {
+      print("Error initializing Porcupine: $e");
+      await _speak("Failed to initialize wake word detection.");
+    }
+  }
+
+  Future<void> _handleWakeWordDetection() async {
+    if (_isPorcupineActive) {
+      await _porcupineManager?.stop();
+      _isPorcupineActive = false;
+      print("Porcupine stopped for command input");
+      await _startVoiceInteraction();
+    }
+  }
+
   Future<void> _initializeTts() async {
     await _flutterTts.setLanguage("en-US");
-    await _flutterTts.setSpeechRate(Provider.of<ThemeProvider>(context, listen: false).speechRate); // Updated to use dynamic speech rate
+    await _flutterTts.setSpeechRate(Provider.of<ThemeProvider>(context, listen: false).speechRate);
     await _flutterTts.setVolume(1.0);
     await _flutterTts.setPitch(1.0);
     _ttsInitialized = true;
@@ -213,15 +254,14 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         onError: (error) => print('Speech error: $error'),
       );
       print("Speech initialized: $_speechInitialized");
-      if (_speechInitialized) {
-        await _startVoiceInteraction();
-      } else {
+      if (!_speechInitialized) {
         await _speak("Speech recognition could not be initialized.");
       }
     } else {
       await _speak("Microphone permission denied. Voice commands won’t work.");
       print("Microphone permission denied");
     }
+    // Removed: await _startVoiceInteraction(); // No immediate mic activation
   }
 
   void _stopListeningWithFeedback() async {
@@ -229,12 +269,26 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       _speech.stop();
       if (_recognizedText.isEmpty) {
         await Future.delayed(const Duration(milliseconds: 500));
-        await _speak("No voice input detected. Please press the microphone button to try again.");
+        await _speak("No voice input detected. Please try again.");
       }
       setState(() {
         _isListening = false;
         _recognizedText = '';
       });
+      _restartPorcupine(); // Restart Porcupine after feedback
+    }
+  }
+
+  Future<void> _restartPorcupine() async {
+    if (!_isPorcupineActive) {
+      try {
+        await _porcupineManager?.start();
+        _isPorcupineActive = true;
+        print("Porcupine restarted after command");
+      } catch (e) {
+        print("Error restarting Porcupine: $e");
+        await _speak("Failed to restart wake word detection.");
+      }
     }
   }
 
@@ -245,6 +299,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         _isListening = false;
         _recognizedText = '';
       });
+      _restartPorcupine(); // Restart Porcupine after stopping
     }
   }
 
@@ -293,23 +348,31 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       return;
     }
 
-    if (command.contains('hello coco')) {
+    /*if (command.contains('hello coco')) {
       await _speak("Give Command");
       _stopListening();
       return;
-    }
+    }*/
 
     _stopListening();
     await _processCommand(command);
   }
 
   Future<void> _startVoiceInteraction() async {
-    print("Microphone activated");
+    print("Starting voice interaction");
     if (_speechInitialized && _ttsInitialized) {
       if (_isListening) {
         _stopListening();
         await Future.delayed(const Duration(milliseconds: 200));
       }
+
+      // Stop Porcupine if active (for button press or wake word)
+      if (_isPorcupineActive) {
+        await _porcupineManager?.stop();
+        _isPorcupineActive = false;
+        print("Porcupine stopped for manual microphone activation");
+      }
+
       if (!_isNavigating && !_awaitingDestination) {
         await _speak("How may I help you?");
         await Future.delayed(const Duration(milliseconds: 300));
@@ -345,6 +408,10 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       print("Speech or TTS not initialized yet");
       if (!_speechInitialized) {
         await _speak("Speech recognition is not initialized. Please check permissions.");
+      }
+      // Restart Porcupine if speech fails
+      if (!_isPorcupineActive) {
+        await _restartPorcupine();
       }
     }
   }
@@ -425,7 +492,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (_detectedObjects.isNotEmpty) {
         String objectsText = "In front of you: ${_detectedObjects.join(", ")}";
         await _speak(objectsText);
-      } else if (_distanceFromSensor != null && _distanceFromSensor! < Provider.of<ThemeProvider>(context, listen: false).distanceThreshold) { // Updated
+      } else if (_distanceFromSensor != null && _distanceFromSensor! < Provider.of<ThemeProvider>(context, listen: false).distanceThreshold) {
         await _speak("An obstacle is in front of you, but no specific objects detected.");
       } else {
         await _speak("No objects detected in front of you right now.");
@@ -660,11 +727,11 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           _detectedObjects = newDetectedObjects;
         });
 
-        final themeProvider = Provider.of<ThemeProvider>(context, listen: false); // Updated
+        final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
         bool isBelowThreshold = _distanceFromSensor != null && _distanceFromSensor! < themeProvider.distanceThreshold;
 
         if (isBelowThreshold && await Vibration.hasVibrator()) {
-          Vibration.vibrate(duration: themeProvider.vibrationDuration); // Updated to use dynamic duration
+          Vibration.vibrate(duration: themeProvider.vibrationDuration);
         }
 
         if (isBelowThreshold && !_isTtsSpeaking) {
@@ -673,7 +740,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
             shouldAnnounce = true;
             _lastAnnouncedBelowThreshold = true;
           } else if (_lastObjectAnnouncementTime != null &&
-              DateTime.now().difference(_lastObjectAnnouncementTime!).inSeconds >= themeProvider.announcementInterval) { // Updated to use dynamic interval
+              DateTime.now().difference(_lastObjectAnnouncementTime!).inSeconds >= themeProvider.announcementInterval) {
             shouldAnnounce = true;
           }
 
@@ -1021,6 +1088,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     _distanceTimer?.cancel();
     _qrDisplayTimer?.cancel();
     _stopListening();
+    _porcupineManager?.stop();
+    _porcupineManager?.delete();
+    _isPorcupineActive = false; // Ensure state is reset
     qrDataChangedNotifier.removeListener(_reloadQrData);
     super.dispose();
   }
@@ -1634,30 +1704,30 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       case 'Admin Panel':
         Navigator.of(context).push(
           MaterialPageRoute(
-            builder: (context) => AdminPanelScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)), // Updated
+            builder: (context) => AdminPanelScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)),
           ),
         );
         break;
       case 'Settings':
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (context) => SettingsScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)), // Updated
+          builder: (context) => SettingsScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)),
         ));
         break;
       case 'Help':
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (context) => HelpScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)), // Updated
+          builder: (context) => HelpScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)),
         ));
         break;
       case 'About':
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (context) => AboutScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)), // Updated
+          builder: (context) => AboutScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)),
         ));
         break;
     }
   }
 
   Widget _buildDrawerItem(String title, IconData icon) {
-    final themeProvider = Provider.of<ThemeProvider>(context, listen: false); // Updated
+    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
       leading: Icon(

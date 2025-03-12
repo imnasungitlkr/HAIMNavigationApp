@@ -14,25 +14,69 @@ import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:provider/provider.dart'; // Added for ChangeNotifierProvider
+import 'package:flutter/foundation.dart'; // Added for ChangeNotifier
 import 'admin_panel.dart';
 import 'config.dart';
 
 // Global notifier for QR data changes
 final ValueNotifier<bool> qrDataChangedNotifier = ValueNotifier(false);
 
-class ThemeProvider {
+class ThemeProvider extends ChangeNotifier { // Updated to ChangeNotifier
   bool _isDarkMode = false;
+  double _distanceThreshold = 75.0;
+  double _speechRate = 0.5; // New: Default speech rate
+  int _vibrationDuration = 500; // New: Default vibration duration in ms
+  int _announcementInterval = 5; // New: Default interval in seconds
+
   bool get isDarkMode => _isDarkMode;
+  double get distanceThreshold => _distanceThreshold;
+  double get speechRate => _speechRate; // New
+  int get vibrationDuration => _vibrationDuration; // New
+  int get announcementInterval => _announcementInterval; // New
 
   Future<void> loadTheme() async {
     final prefs = await SharedPreferences.getInstance();
     _isDarkMode = prefs.getBool('isDarkMode') ?? false;
+    _distanceThreshold = prefs.getDouble('distanceThreshold') ?? 75.0;
+    _speechRate = prefs.getDouble('speechRate') ?? 0.5; // New
+    _vibrationDuration = prefs.getInt('vibrationDuration') ?? 500; // New
+    _announcementInterval = prefs.getInt('announcementInterval') ?? 5; // New
   }
 
   Future<void> toggleTheme() async {
     _isDarkMode = !_isDarkMode;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('isDarkMode', _isDarkMode);
+    notifyListeners(); // Added to notify UI of theme change
+  }
+
+  Future<void> setDistanceThreshold(double value) async {
+    _distanceThreshold = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('distanceThreshold', _distanceThreshold);
+    notifyListeners(); // Added
+  }
+
+  Future<void> setSpeechRate(double value) async { // New
+    _speechRate = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('speechRate', _speechRate);
+    notifyListeners();
+  }
+
+  Future<void> setVibrationDuration(int value) async { // New
+    _vibrationDuration = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('vibrationDuration', _vibrationDuration);
+    notifyListeners();
+  }
+
+  Future<void> setAnnouncementInterval(int value) async { // New
+    _announcementInterval = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('announcementInterval', _announcementInterval);
+    notifyListeners();
   }
 }
 
@@ -40,26 +84,29 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final themeProvider = ThemeProvider();
   await themeProvider.loadTheme();
-  runApp(MyApp(themeProvider: themeProvider));
+  runApp(
+    ChangeNotifierProvider( // Updated to use Provider
+      create: (_) => themeProvider,
+      child: const MyApp(),
+    ),
+  );
 }
 
-class MyApp extends StatefulWidget {
-  final ThemeProvider themeProvider;
-  const MyApp({super.key, required this.themeProvider});
+class MyApp extends StatelessWidget { // Updated to StatelessWidget and removed themeProvider parameter
+  const MyApp({super.key});
 
-  @override
-  State<MyApp> createState() => _MyAppState();
-}
-
-class _MyAppState extends State<MyApp> {
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.light(),
-      darkTheme: ThemeData.dark(),
-      themeMode: widget.themeProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
-      home: BlindNavigationApp(themeProvider: widget.themeProvider),
+    return Consumer<ThemeProvider>( // Updated to use Consumer
+      builder: (context, themeProvider, child) {
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData.light(),
+          darkTheme: ThemeData.dark(),
+          themeMode: themeProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
+          home: const BlindNavigationApp(), // Updated to remove themeProvider parameter
+        );
+      },
     );
   }
 }
@@ -72,8 +119,7 @@ class Landmark {
 }
 
 class BlindNavigationApp extends StatefulWidget {
-  final ThemeProvider themeProvider;
-  const BlindNavigationApp({super.key, required this.themeProvider});
+  const BlindNavigationApp({super.key}); // Updated to remove themeProvider parameter
 
   @override
   State<BlindNavigationApp> createState() => _BlindNavigationAppState();
@@ -114,25 +160,45 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   bool _isTtsSpeaking = false;
   LatLng? _initialQrPosition;
   String _recognizedText = '';
+  bool _ttsInitialized = false;
+  DateTime _lastDirectionFetch = DateTime.now();
+  final Duration _debounceDuration = Duration(seconds: 10);
+  bool _awaitingGpsSwitchResponse = false;
+  bool _lastAnnouncedBelowThreshold = false;
+  DateTime? _lastObjectAnnouncementTime;
 
   final List<Landmark> landmarks = [];
 
   @override
   void initState() {
     super.initState();
-    _initializeTts();
+    _initializeApp();
+  }
+
+  Future<void> _initializeApp() async {
+    await _initializeTts();
+    await Future.delayed(const Duration(milliseconds: 500));
     _addMarkers();
-    _loadQrData();
+    await _loadQrData();
     _startLocationUpdates();
     _startDistanceUpdates();
-    _initializeSpeech();
+    await _initializeSpeech();
     _setCustomMarkers().then((_) {
       _addMarkers();
     });
     _flutterTts.setCompletionHandler(() {
       print("TTS Speech Completed");
     });
-    qrDataChangedNotifier.addListener(_reloadQrData); // Listen to QR data changes
+    qrDataChangedNotifier.addListener(_reloadQrData);
+  }
+
+  Future<void> _initializeTts() async {
+    await _flutterTts.setLanguage("en-US");
+    await _flutterTts.setSpeechRate(Provider.of<ThemeProvider>(context, listen: false).speechRate); // Updated to use dynamic speech rate
+    await _flutterTts.setVolume(1.0);
+    await _flutterTts.setPitch(1.0);
+    _ttsInitialized = true;
+    print("TTS Initialized");
   }
 
   Future<void> _initializeSpeech() async {
@@ -150,10 +216,10 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (_speechInitialized) {
         await _startVoiceInteraction();
       } else {
-        _speak("Speech recognition could not be initialized.");
+        await _speak("Speech recognition could not be initialized.");
       }
     } else {
-      _speak("Microphone permission denied. Voice commands won’t work.");
+      await _speak("Microphone permission denied. Voice commands won’t work.");
       print("Microphone permission denied");
     }
   }
@@ -163,7 +229,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       _speech.stop();
       if (_recognizedText.isEmpty) {
         await Future.delayed(const Duration(milliseconds: 500));
-        await _speak("No voice input detected. Press the microphone button to try again.");
+        await _speak("No voice input detected. Please press the microphone button to try again.");
       }
       setState(() {
         _isListening = false;
@@ -182,11 +248,48 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     }
   }
 
+  Future<void> _handleGpsSwitchResponse(String response) async {
+    _awaitingGpsSwitchResponse = false;
+    String normalizedResponse = response.toLowerCase().trim();
+
+    if (normalizedResponse == "yes" && _currentPosition != null && _destination != null) {
+      await _speak("Switching to GPS navigation.");
+      setState(() {
+        _destinationQrId = null;
+      });
+      await _fetchAndSpeakDirections(
+        LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+        _destination!,
+      );
+    } else if (normalizedResponse == "no" && _lastDetectedQrId != null) {
+      await _speak("Guiding you back to the QR path.");
+      LatLng lastQrPos = LatLng(
+        _qrData[_lastDetectedQrId]['current_location'][0],
+        _qrData[_lastDetectedQrId]['current_location'][1],
+      );
+      if (_currentPosition != null) {
+        await _fetchAndSpeakDirections(
+          LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+          lastQrPos,
+        );
+      }
+    } else {
+      await _speak("I didn’t catch that. Please say 'yes' to switch to GPS or 'no' to return to the QR path.");
+      _awaitingGpsSwitchResponse = true;
+      await _startVoiceInteraction();
+    }
+  }
+
   void _processVoiceCommand(String command) async {
     if (command.isEmpty) return;
 
     if (_awaitingDestination) {
-      _handleDestinationCommand(command);
+      await _handleDestinationCommand(command);
+      return;
+    }
+
+    if (_awaitingGpsSwitchResponse) {
+      await _handleGpsSwitchResponse(command);
       return;
     }
 
@@ -202,18 +305,17 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
   Future<void> _startVoiceInteraction() async {
     print("Microphone activated");
-    if (_speechInitialized) {
+    if (_speechInitialized && _ttsInitialized) {
       if (_isListening) {
         _stopListening();
         await Future.delayed(const Duration(milliseconds: 200));
       }
-      String prompt = _isNavigating
-          ? "How may I help you?"
-          : "How may I help you?";
-      await _speak(prompt);
-      await Future.delayed(const Duration(milliseconds: 500));
-      await _speak("Microphone is on, speak now.");
-      await Future.delayed(const Duration(milliseconds: 500));
+      if (!_isNavigating && !_awaitingDestination) {
+        await _speak("How may I help you?");
+        await Future.delayed(const Duration(milliseconds: 300));
+        await _speak("Microphone is on, speak now.");
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
 
       _speech.listen(
         onResult: (result) {
@@ -240,21 +342,77 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         Vibration.vibrate(pattern: [0, 200, 100, 200]);
       }
     } else {
-      await _speak("Speech recognition is not initialized. Please check permissions.");
+      print("Speech or TTS not initialized yet");
+      if (!_speechInitialized) {
+        await _speak("Speech recognition is not initialized. Please check permissions.");
+      }
     }
   }
 
   Future<void> _processCommand(String command) async {
-    final locationCommands = ['where am i', 'location', 'my position'];
-    final destCommands = ['set destination', 'i want to go to', 'go to', 'navigate to'];
-    final stopCommands = ['stop navigation', 'end navigation', 'stop'];
+    final locationCommands = [
+      'where am i',
+      'location',
+      'my position',
+      'where am i at',
+      'where’s my location',
+      'tell me my location',
+      'what’s my position',
+      'where am i now',
+      'current location',
+      'my current position',
+      'where am i standing',
+      'give me my location',
+    ];
+    final destCommands = [
+      'set destination',
+      'i want to go to',
+      'go to',
+      'navigate to',
+      'take me to',
+      'head to',
+      'direct me to',
+      'guide me to',
+      'bring me to',
+      'set my destination to',
+      'i’d like to go to',
+      'travel to',
+      'point me to',
+    ];
+    final stopCommands = [
+      'stop navigation',
+      'end navigation',
+      'stop',
+      'quit navigation',
+      'cancel navigation',
+      'halt navigation',
+      'stop guiding',
+      'end trip',
+      'cease navigation',
+      'pause navigation',
+      'finish navigation',
+      'stop directions',
+    ];
+    final objectCommands = [
+      'what is in front of me',
+      'what’s in front of me',
+      'what’s ahead of me',
+      'what is ahead',
+      'what’s up ahead',
+      'tell me what’s in front',
+      'what objects are in front',
+      'what’s blocking me',
+      'what’s in my way',
+      'what do i see ahead',
+      'what’s out there',
+      'list objects in front',
+    ];
 
     if (locationCommands.any((cmd) => command.contains(cmd))) {
       await _handleWhereAmI();
     } else if (destCommands.any((cmd) => command.contains(cmd))) {
       String dest = command.replaceAll(RegExp(destCommands.join('|'), caseSensitive: false), '').trim();
       if (dest.isNotEmpty) {
-        _awaitingDestination = true;
         await _handleDestinationCommand(dest);
       } else {
         await _speak("Where to? Say a place like 'Library' or 'Cafeteria.'");
@@ -263,8 +421,17 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     } else if (_isNavigating && stopCommands.any((cmd) => command.contains(cmd))) {
       await _stopNavigation();
       await _speak("Navigation stopped.");
+    } else if (objectCommands.any((cmd) => command.contains(cmd))) {
+      if (_detectedObjects.isNotEmpty) {
+        String objectsText = "In front of you: ${_detectedObjects.join(", ")}";
+        await _speak(objectsText);
+      } else if (_distanceFromSensor != null && _distanceFromSensor! < Provider.of<ThemeProvider>(context, listen: false).distanceThreshold) { // Updated
+        await _speak("An obstacle is in front of you, but no specific objects detected.");
+      } else {
+        await _speak("No objects detected in front of you right now.");
+      }
     } else {
-      await _speak("I didn’t understand that. Please press the microphone button and try again with commands like 'where am I' or 'set destination to Library.'");
+      await _speak("I didn’t understand that. Please press the microphone button and try again with commands like 'where am I', 'set destination to Library', or 'what is in front of me'.");
     }
     setState(() => _recognizedText = '');
   }
@@ -335,7 +502,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           : null;
       String nearestQr = currentPos != null ? _findNearestQr(currentPos) : '';
       if (nearestQr.isNotEmpty) {
-        _setDestination(qrId: nearestQr);
+        await _setDestination(qrId: nearestQr);
         await _speak("Destination set to nearest QR code: ${_qrData[nearestQr]['name']}");
       } else {
         await _speak("No nearby QR codes found or location unavailable. Please specify a destination or enable GPS.");
@@ -355,7 +522,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     });
 
     if (matchedQrId != null) {
-      _setDestination(qrId: matchedQrId);
+      await _setDestination(qrId: matchedQrId);
       await _speak("Destination set to ${_qrData[matchedQrId]['name']}. Follow the QR path.");
     } else {
       await _speak("Destination not found. Please press the microphone button and try again with a valid location, like 'Library' or 'Cafeteria.'");
@@ -365,22 +532,33 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
   Future<void> _speak(String text) async {
     print("Speaking: $text");
+    if (!_ttsInitialized) {
+      print("TTS not initialized yet, queuing: $text");
+      _ttsQueue.add(text);
+      return;
+    }
+
     _ttsQueue.add(text);
-    if (!_isTtsSpeaking) {
-      _isTtsSpeaking = true;
-      while (_ttsQueue.isNotEmpty) {
-        String next = _ttsQueue.removeFirst();
-        await _flutterTts.stop();
-        Completer<void> completer = Completer<void>();
-        _flutterTts.setCompletionHandler(() {
-          completer.complete();
-        });
-        await _flutterTts.speak(next);
-        await completer.future;
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
+    await _flutterTts.stop();
+    if (_isTtsSpeaking) {
       _isTtsSpeaking = false;
     }
+
+    while (_ttsQueue.isNotEmpty) {
+      _isTtsSpeaking = true;
+      String next = _ttsQueue.removeFirst();
+      Completer<void> completer = Completer<void>();
+      _flutterTts.setCompletionHandler(() {
+        completer.complete();
+      });
+      await _flutterTts.speak(next);
+      await completer.future.catchError((e) {
+        print("TTS error: $e");
+        completer.complete();
+      });
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+    _isTtsSpeaking = false;
   }
 
   Future<void> _loadQrData() async {
@@ -471,7 +649,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
   Future<void> _fetchDistance() async {
     try {
-      final response = await http.get(Uri.parse('http://192.168.134.92:5000/data'));
+      final response = await http.get(Uri.parse('http://192.168.46.92:5000/data'));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         double newDistance = data['distance_cm'];
@@ -482,10 +660,34 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           _detectedObjects = newDetectedObjects;
         });
 
-        if (_distanceFromSensor != null && _distanceFromSensor! < 75) {
-          if (await Vibration.hasVibrator()) {
-            Vibration.vibrate(duration: 500);
+        final themeProvider = Provider.of<ThemeProvider>(context, listen: false); // Updated
+        bool isBelowThreshold = _distanceFromSensor != null && _distanceFromSensor! < themeProvider.distanceThreshold;
+
+        if (isBelowThreshold && await Vibration.hasVibrator()) {
+          Vibration.vibrate(duration: themeProvider.vibrationDuration); // Updated to use dynamic duration
+        }
+
+        if (isBelowThreshold && !_isTtsSpeaking) {
+          bool shouldAnnounce = false;
+          if (!_lastAnnouncedBelowThreshold) {
+            shouldAnnounce = true;
+            _lastAnnouncedBelowThreshold = true;
+          } else if (_lastObjectAnnouncementTime != null &&
+              DateTime.now().difference(_lastObjectAnnouncementTime!).inSeconds >= themeProvider.announcementInterval) { // Updated to use dynamic interval
+            shouldAnnounce = true;
           }
+
+          if (shouldAnnounce) {
+            if (_detectedObjects.isNotEmpty) {
+              String objectsText = _detectedObjects.join(", ") + " detected";
+              _speak(objectsText);
+            } else {
+              _speak("An obstacle is in front of you, but no specific objects detected.");
+            }
+            _lastObjectAnnouncementTime = DateTime.now();
+          }
+        } else if (!isBelowThreshold && _lastAnnouncedBelowThreshold) {
+          _lastAnnouncedBelowThreshold = false;
         }
 
         if (data['qr_codes'] != null && data['qr_codes'].isNotEmpty) {
@@ -533,9 +735,24 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   }
 
   void updateNavigationMode() {
-    if (_lastDetectedQrId != null) {
-      _useQRNavigation(_lastDetectedQrId!);
-    } else if (_currentPosition != null) {
+    if (_destinationQrId != null && _isNavigating) {
+      if (_lastDetectedQrId != null) {
+        _useQRNavigation(_lastDetectedQrId!);
+      } else if (_currentPosition != null) {
+        String nearestQr = _findNearestQr(LatLng(_currentPosition!.latitude, _currentPosition!.longitude));
+        if (nearestQr.isNotEmpty) {
+          _speak("No recent QR detected. Guiding you to the nearest QR: ${_qrData[nearestQr]['name']}.");
+          _fetchAndSpeakDirections(
+            LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+            LatLng(_qrData[nearestQr]['current_location'][0], _qrData[nearestQr]['current_location'][1]),
+          );
+        } else {
+          _speak("No QR codes found nearby. Please scan a QR code to start navigation.");
+        }
+      } else {
+        _speak("Please scan a QR code or enable GPS to start QR-based navigation.");
+      }
+    } else if (_currentPosition != null && _isNavigating) {
       _useGPSNavigation(_currentPosition!);
     } else {
       _speak("No location data available. Please scan a QR code or enable GPS.");
@@ -565,7 +782,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (path.isNotEmpty) {
         if (path.length > 1) {
           String nextQr = path[1];
-          await _speak("You are on the correct path. Next stop: ${_qrData[nextQr]['name']}");
+          await _speak("You are on the correct path. Next stop: ${_qrData[nextQr]['name']}.");
         } else {
           await _speak("You have reached your destination.");
           await _stopNavigation();
@@ -611,43 +828,54 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   }
 
   void handleLocationChange(Position position) {
-    if (_lastDetectedQrId != null) {
-      double distanceToLastQR = Geolocator.distanceBetween(
-          position.latitude,
-          position.longitude,
-          _qrData[_lastDetectedQrId]['current_location'][0],
-          _qrData[_lastDetectedQrId]['current_location'][1]);
-      if (distanceToLastQR > 15) {
-        _speak("Warning: You are moving away from the QR path. Switching to GPS navigation.");
-        _lastDetectedQrId = null;
+    if (_destinationQrId != null && _isNavigating) {
+      if (_lastDetectedQrId != null) {
+        double distanceToLastQR = Geolocator.distanceBetween(
+            position.latitude,
+            position.longitude,
+            _qrData[_lastDetectedQrId]['current_location'][0],
+            _qrData[_lastDetectedQrId]['current_location'][1]);
+        if (distanceToLastQR > 50 && !_awaitingGpsSwitchResponse) {
+          _awaitingGpsSwitchResponse = true;
+          _speak(
+            "You are ${distanceToLastQR.toStringAsFixed(0)} meters away from the QR code. "
+                "Please turn back to the QR path, or would you like to switch to GPS navigation? Say 'yes' or 'no'.",
+          );
+          _startVoiceInteraction();
+        }
+      } else if (_currentPosition != null) {
+        String nearestQr = _findNearestQr(LatLng(_currentPosition!.latitude, _currentPosition!.longitude));
+        if (nearestQr.isNotEmpty) {
+          double distanceToNearest = Geolocator.distanceBetween(
+            position.latitude,
+            position.longitude,
+            _qrData[nearestQr]['current_location'][0],
+            _qrData[nearestQr]['current_location'][1],
+          );
+          if (distanceToNearest < 10) {
+            setState(() {
+              _lastDetectedQrId = nearestQr;
+              _initialQrPosition = LatLng(_qrData[nearestQr]['current_location'][0], _qrData[nearestQr]['current_location'][1]);
+            });
+            _speak("You are near ${_qrData[nearestQr]['name']}. Using this as your starting QR.");
+          }
+        }
       }
+    } else if (_isNavigating && _destinationQrId == null) {
+      updateNavigationMode();
     }
-    updateNavigationMode();
-  }
-
-  Future<void> _initializeTts() async {
-    await _flutterTts.setLanguage("en-US");
-    await _flutterTts.setSpeechRate(0.5);
-    await _flutterTts.setVolume(1.0);
-    await _flutterTts.setPitch(1.0);
   }
 
   void _startLocationUpdates() {
     Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.high,
-        distanceFilter: 5,
+        distanceFilter: 2,
       ),
     ).listen((Position position) {
       if (_isNavigating) {
-        if (_currentPosition == null ||
-            Geolocator.distanceBetween(
-                _currentPosition!.latitude,
-                _currentPosition!.longitude,
-                position.latitude,
-                position.longitude) > 5) {
-          _getCurrentLocation(position);
-        }
+        _getCurrentLocation(position);
+        handleLocationChange(position);
       }
     }, onError: (error) {
       print('Error getting location: $error');
@@ -675,10 +903,13 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     }
 
     if (_destination != null && _isNavigating && _destinationQrId == null) {
-      _fetchAndSpeakDirections(
-        LatLng(position.latitude, position.longitude),
-        _destination!,
-      );
+      if (DateTime.now().difference(_lastDirectionFetch) > _debounceDuration) {
+        _fetchAndSpeakDirections(
+          LatLng(position.latitude, position.longitude),
+          _destination!,
+        );
+        _lastDirectionFetch = DateTime.now();
+      }
     }
 
     _provideContextualInfo(position);
@@ -743,6 +974,8 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
   void _provideContextualInfo(Position position) {
     const double proximityThreshold = 30;
+    if (_isTtsSpeaking) return;
+
     _qrData.forEach((qrId, qrInfo) {
       LatLng qrPosition = LatLng(qrInfo['current_location'][0], qrInfo['current_location'][1]);
       double distanceToQr = Geolocator.distanceBetween(
@@ -788,7 +1021,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     _distanceTimer?.cancel();
     _qrDisplayTimer?.cancel();
     _stopListening();
-    qrDataChangedNotifier.removeListener(_reloadQrData); // Clean up listener
+    qrDataChangedNotifier.removeListener(_reloadQrData);
     super.dispose();
   }
 
@@ -796,10 +1029,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     if (!_isNavigating) return;
 
     final cacheKey = '${start.latitude},${start.longitude}-${end.latitude},${end.longitude}';
+    Map<String, dynamic> result;
 
     try {
-      Map<String, dynamic> result;
-
       if (_directionsCache.containsKey(cacheKey)) {
         result = _directionsCache[cacheKey]!;
         print("Using cached directions for $cacheKey");
@@ -811,8 +1043,8 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
       if (!_isNavigating) return;
 
-      final directions = result['directions'] ?? [];
-      final polylinePoints = result['polylinePoints'] ?? [];
+      final List<String> directions = result['directions'] ?? [];
+      final List<LatLng> polylinePoints = result['polylinePoints'] ?? [];
 
       setState(() {
         _polylinePoints = polylinePoints;
@@ -825,87 +1057,115 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         ));
       });
 
+      if (!_isTtsSpeaking) {
+        await _speak("Here are your GPS directions:");
+      }
+
       final importantDirections = directions.where((dir) {
-        return dir is String && dir.contains(RegExp(r'turn|continue|merge|exit|left|right|roundabout', caseSensitive: false));
+        return dir.contains(RegExp(r'turn|continue|merge|exit|left|right|roundabout', caseSensitive: false));
       }).toList();
 
-      for (int i = 0; i < importantDirections.length; i++) {
-        if (!_isNavigating) return;
-
+      for (int i = 0; i < importantDirections.length && _isNavigating; i++) {
         String refinedText = _refineDirection(importantDirections[i]);
         print("Refined Text: $refinedText");
-
-        await _flutterTts.stop();
-
-        Completer<void> completer = Completer<void>();
-
-        _flutterTts.setStartHandler(() {
-          print("Speech Started");
-        });
-
-        _flutterTts.setCompletionHandler(() {
-          print("Speech Completed");
-          completer.complete();
-        });
-
-        await _flutterTts.speak(refinedText);
-        await completer.future;
-
-        if (!_isNavigating) return;
-
-        if (i < importantDirections.length - 1) {
-          Completer<void> nextCompleter = Completer<void>();
-          _flutterTts.setCompletionHandler(() {
-            nextCompleter.complete();
-          });
-          await _flutterTts.speak("next");
-          await nextCompleter.future;
+        if (!_isTtsSpeaking) {
+          await _speak(refinedText);
+          if (i < importantDirections.length - 1 && _isNavigating) {
+            await _speak("next");
+          }
         }
       }
 
       if (!_isNavigating) return;
-      Completer<void> overCompleter = Completer<void>();
-      _flutterTts.setCompletionHandler(() {
-        overCompleter.complete();
-      });
-      await _flutterTts.speak("over");
-      await overCompleter.future;
+      if (!_isTtsSpeaking) {
+        await _speak("over");
+      }
 
+      int currentStepIndex = 0;
+      double distanceToNextStep = double.infinity;
+
+      while (_isNavigating && currentStepIndex < directions.length) {
+        if (_currentPosition == null) {
+          await _fetchCurrentLocation();
+          continue;
+        }
+
+        LatLng currentPos = LatLng(_currentPosition!.latitude, _currentPosition!.longitude);
+        String step = directions[currentStepIndex];
+        String refinedStep = _refineDirection(step);
+
+        if (currentStepIndex < polylinePoints.length) {
+          distanceToNextStep = Geolocator.distanceBetween(
+            currentPos.latitude,
+            currentPos.longitude,
+            polylinePoints[currentStepIndex].latitude,
+            polylinePoints[currentStepIndex].longitude,
+          );
+        }
+
+        if (!_isTtsSpeaking) {
+          if (distanceToNextStep < 20 || currentStepIndex == 0) {
+            await _speak("Now, $refinedStep");
+            currentStepIndex++;
+          } else {
+            await _speak("Continue for ${distanceToNextStep.toStringAsFixed(0)} meters, then $refinedStep");
+          }
+        }
+
+        await Future.delayed(const Duration(seconds: 5));
+        if (_currentPosition != null) {
+          _updatePolyline(_currentPosition!);
+        }
+      }
+
+      if (_isNavigating) {
+        if (!_isTtsSpeaking) {
+          await _speak("You have arrived at your destination.");
+        }
+        if (_destinationQrId != null && _currentPosition != null) {
+          String nearestQr = _findNearestQr(LatLng(_currentPosition!.latitude, _currentPosition!.longitude));
+          if (nearestQr.isNotEmpty) {
+            setState(() {
+              _lastDetectedQrId = nearestQr;
+              _initialQrPosition = LatLng(_qrData[nearestQr]['current_location'][0], _qrData[nearestQr]['current_location'][1]);
+            });
+            await _navigateThroughQrPath(findShortestPath(nearestQr, _destinationQrId!));
+          }
+        } else {
+          await _stopNavigation();
+        }
+      }
     } catch (e) {
       print('Error fetching directions: $e');
-      if (_isNavigating) {
-        _speak("Failed to get directions.");
+      if (_isNavigating && !_isTtsSpeaking) {
+        await _speak("Failed to get directions. Please try again.");
       }
     }
   }
 
   String _refineDirection(String direction) {
     String cleanedText = direction.replaceAll(RegExp(r'<[^>]*>|[\[\]\(\)]'), '').trim();
-    RegExp streetNameRegex = RegExp(r"(?:onto|on)\s+([^\s,]+(?:[\s-][^\s,]+)*)");
-    Match? streetMatch = streetNameRegex.firstMatch(cleanedText);
-    String? streetName = streetMatch?.group(1)?.trim();
-    RegExp distanceRegex = RegExp(r"in\s+([\d.,]+)\s*(miles|kilometers|meters|feet|yards)?");
-    Match? distanceMatch = distanceRegex.firstMatch(cleanedText);
-    String? distance = distanceMatch?.group(1)?.trim();
-    String? units = distanceMatch?.group(2)?.trim();
+    RegExp turnRegex = RegExp(r'(turn|head|merge|continue|exit|left|right|roundabout)', caseSensitive: false);
+    RegExp distanceRegex = RegExp(r'in\s+([\d.,]+)\s*(miles|kilometers|meters|feet|yards)?', caseSensitive: false);
+    RegExp streetRegex = RegExp(r'(?:onto|on|to|toward|at)\s+([^\s,]+(?:[\s-][^\s,]+)*)', caseSensitive: false);
 
-    String refined = cleanedText;
-    if (streetName != null) {
-      refined += "\nStreet: $streetName";
-    }
-    if (distance != null) {
-      refined += "\nDistance: $distance ${units ?? ''}";
-    }
+    String turn = turnRegex.firstMatch(cleanedText)?.group(0)?.toLowerCase() ?? 'proceed';
+    String? distance = distanceRegex.firstMatch(cleanedText)?.group(1);
+    String? units = distanceRegex.firstMatch(cleanedText)?.group(2) ?? 'meters';
+    String? street = streetRegex.firstMatch(cleanedText)?.group(1)?.trim();
+
+    String refined = "$turn";
+    if (street != null) refined += " onto $street";
+    if (distance != null && turn != "continue") refined += " in $distance $units";
     return refined;
   }
 
   Future<void> _stopNavigation() async {
     if (_isNavigating) {
       _isNavigating = false;
-
       await _flutterTts.stop();
       _ttsQueue.clear();
-
+      _isTtsSpeaking = false;
       setState(() {
         _polylines.clear();
         _markers.removeWhere((marker) => marker.markerId.value == 'destination');
@@ -914,8 +1174,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         _directionsCache.clear();
         _polylinePoints.clear();
       });
-
-      await _flutterTts.speak("Navigation has been stopped.");
+      await _speak("Navigation has been stopped.");
       print("Navigation stopped.");
     }
   }
@@ -1011,22 +1270,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       _polylines.clear();
       _markers.removeWhere((marker) => marker.markerId.value == 'destination');
 
-      if (_currentPosition != null) {
-        start = LatLng(_currentPosition!.latitude, _currentPosition!.longitude);
-        if (!useGps && (_lastDetectedQrId != null && _qrData.containsKey(_lastDetectedQrId))) {
-          startQrId = _lastDetectedQrId;
-          start = LatLng(
-            _qrData[startQrId]['current_location'][0],
-            _qrData[startQrId]['current_location'][1],
-          );
-        } else if (!useGps && qrId != null && _qrData.containsKey(qrId)) {
-          startQrId = _findNearestQr(start!);
-        }
-      } else if (_initialQrPosition != null && !useGps) {
-        start = _initialQrPosition!;
-        startQrId = _findNearestQr(start!);
-      }
-
       if (qrId != null && _qrData.containsKey(qrId) && !useGps) {
         _destinationQrId = qrId;
         _destination = LatLng(
@@ -1034,8 +1277,8 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           _qrData[qrId]['current_location'][1],
         );
       } else if (gpsDestination != null) {
-        _destination = gpsDestination;
         _destinationQrId = null;
+        _destination = gpsDestination;
         _markers.add(
           Marker(
             markerId: const MarkerId('destination'),
@@ -1046,35 +1289,57 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         );
       }
 
+      if (_currentPosition != null) {
+        start = LatLng(_currentPosition!.latitude, _currentPosition!.longitude);
+        if (_lastDetectedQrId != null && _qrData.containsKey(_lastDetectedQrId) && qrId != null && !useGps) {
+          startQrId = _lastDetectedQrId;
+          start = LatLng(
+            _qrData[startQrId]['current_location'][0],
+            _qrData[startQrId]['current_location'][1],
+          );
+        } else if (qrId != null && !useGps) {
+          startQrId = _findNearestQr(start!);
+        }
+      } else if (_initialQrPosition != null && qrId != null && !useGps) {
+        start = _initialQrPosition!;
+        startQrId = _findNearestQr(start!);
+      }
+
       _isNavigating = true;
     });
 
     if (start == null) {
-      await _speak("No location available. Please enable GPS or scan a QR code.");
+      await _speak("No location available. Please enable GPS or scan a QR code to start navigation.");
       return;
-    }
-
-    if (startQrId != null && !useGps) {
-      await _speak("Starting navigation from QR: ${_qrData[startQrId]['name']}");
-    } else {
-      await _speak("Starting from your current GPS location.");
     }
 
     if (qrId != null && _qrData.containsKey(qrId) && !useGps) {
       if (startQrId != null) {
+        await _speak("Starting QR navigation from ${_qrData[startQrId]['name']} to ${_qrData[qrId]['name']}.");
         List<String> qrPath = findShortestPath(startQrId!, qrId);
         if (qrPath.isNotEmpty) {
           await _announceQrPath(qrPath);
           await _navigateThroughQrPath(qrPath);
         } else {
-          await _speak("No QR path found from ${_qrData[startQrId]['name']} to ${_qrData[qrId]['name']}. Switching to GPS navigation.");
+          await _speak("No direct QR path found from ${_qrData[startQrId]['name']} to ${_qrData[qrId]['name']}. Switching to GPS navigation.");
           await _fetchAndSpeakDirections(start!, _destination!);
         }
+      } else if (_currentPosition != null) {
+        String nearestQr = _findNearestQr(start!);
+        if (nearestQr.isNotEmpty) {
+          await _speak("No recent QR detected. Guiding you to the nearest QR: ${_qrData[nearestQr]['name']} to start QR navigation to ${_qrData[qrId]['name']}.");
+          await _fetchAndSpeakDirections(
+            start!,
+            LatLng(_qrData[nearestQr]['current_location'][0], _qrData[nearestQr]['current_location'][1]),
+          );
+        } else {
+          await _speak("No QR codes found nearby. Please scan a QR code to start navigation.");
+        }
       } else {
-        await _speak("Please scan a QR code to start QR-based navigation.");
-        await _fetchAndSpeakDirections(start!, _destination!);
+        await _speak("Please scan a QR code or enable GPS to start QR-based navigation to ${_qrData[qrId]['name']}.");
       }
-    } else if (gpsDestination != null) {
+    } else if (gpsDestination != null || useGps) {
+      await _speak("Starting GPS navigation from your current location.");
       await _fetchAndSpeakDirections(start!, _destination!);
     }
   }
@@ -1112,102 +1377,137 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     setState(() {
       _polylines.clear();
       _polylinePoints = pathPoints;
-      _polylines.add(
-        Polyline(
-          polylineId: const PolylineId('qr_route'),
-          points: _polylinePoints,
-          color: Colors.green,
-          width: 5,
-        ),
-      );
+      _polylines.add(Polyline(
+        polylineId: const PolylineId('qr_route'),
+        points: _polylinePoints,
+        color: Colors.green,
+        width: 5,
+      ));
 
       for (String qrId in qrPath) {
-        LatLng qrPos = LatLng(
-          _qrData[qrId]['current_location'][0],
-          _qrData[qrId]['current_location'][1],
-        );
-        _markers.add(
-          Marker(
-            markerId: MarkerId('qr_$qrId'),
-            position: qrPos,
-            infoWindow: InfoWindow(title: _qrData[qrId]['name']),
-            icon: qrPinIcon,
-          ),
-        );
+        LatLng qrPos = LatLng(_qrData[qrId]['current_location'][0], _qrData[qrId]['current_location'][1]);
+        _markers.add(Marker(
+          markerId: MarkerId('qr_$qrId'),
+          position: qrPos,
+          infoWindow: InfoWindow(title: _qrData[qrId]['name']),
+          icon: qrPinIcon,
+        ));
       }
     });
 
     int currentIndex = qrPath.indexOf(_lastDetectedQrId ?? qrPath[0]);
     if (currentIndex == -1) currentIndex = 0;
 
-    while (_isNavigating && currentIndex < qrPath.length - 1) {
+    if (currentIndex < qrPath.length - 1) {
       String nextQrId = qrPath[currentIndex + 1];
-      LatLng nextQrPos = LatLng(
-        _qrData[nextQrId]['current_location'][0],
-        _qrData[nextQrId]['current_location'][1],
+      await _speak("Starting from ${_qrData[qrPath[currentIndex]]['name']}. Your next stop is ${_qrData[nextQrId]['name']}. Please proceed and scan the next QR code when you reach it.");
+    }
+
+    StreamSubscription<Position>? positionStream;
+    DateTime lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5));
+    double lastDistance = double.infinity;
+
+    positionStream = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 1,
+      ),
+    ).listen((Position position) async {
+      if (!_isNavigating) {
+        positionStream?.cancel();
+        return;
+      }
+
+      _getCurrentLocation(position);
+      LatLng currentPos = LatLng(position.latitude, position.longitude);
+
+      if (currentIndex >= qrPath.length - 1) {
+        await _speak("You have reached your destination: ${_qrData[qrPath.last]['name']}.");
+        await _stopNavigation();
+        positionStream?.cancel();
+        return;
+      }
+
+      String nextQrId = qrPath[currentIndex + 1];
+      LatLng nextQrPos = LatLng(_qrData[nextQrId]['current_location'][0], _qrData[nextQrId]['current_location'][1]);
+      double distanceToNextQr = Geolocator.distanceBetween(
+        currentPos.latitude,
+        currentPos.longitude,
+        nextQrPos.latitude,
+        nextQrPos.longitude,
       );
 
-      if (_lastDetectedQrId == qrPath[currentIndex] || (_lastDetectedQrId == null && currentIndex == 0)) {
-        await _speak("Proceed to ${_qrData[nextQrId]['name']}. Scan the QR code when you arrive.");
+      if (_lastDetectedQrId == nextQrId) {
+        currentIndex++;
+        if (currentIndex >= qrPath.length - 1) {
+          await _speak("You have reached your destination: ${_qrData[qrPath.last]['name']}.");
+          await _stopNavigation();
+          positionStream?.cancel();
+          return;
+        }
+        String newNextQrId = qrPath[currentIndex + 1];
+        await _speak("You’ve reached ${_qrData[nextQrId]['name']}. Your next stop is ${_qrData[newNextQrId]['name']}.");
+        await _provideQrToQrInstructions(nextQrId, newNextQrId);
+        lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 5));
+        return;
       }
 
-      await _waitForNextQrOrFallback(nextQrId, nextQrPos);
-      currentIndex = qrPath.indexOf(_lastDetectedQrId ?? qrPath[currentIndex]);
-      if (currentIndex == -1) currentIndex = 0;
-    }
+      if (distanceToNextQr > 150) {
+        await _speak("You are ${distanceToNextQr.toStringAsFixed(0)} meters off the QR path. Switching to GPS navigation.");
+        await _flutterTts.stop();
+        _ttsQueue.clear();
+        positionStream?.cancel();
+        await _fetchAndSpeakDirections(currentPos, _destination!);
+        return;
+      }
 
-    if (_lastDetectedQrId == qrPath.last) {
-      await _speak("You have reached your destination: ${_qrData[qrPath.last]['name']}.");
-      await _stopNavigation();
-    }
+      bool shouldAnnounce = DateTime.now().difference(lastAnnouncement) >= const Duration(seconds: 5) ||
+          (lastDistance - distanceToNextQr).abs() > 10;
+
+      if (shouldAnnounce && !_isTtsSpeaking) {
+        String announcement;
+        if (distanceToNextQr <= 10) {
+          announcement = "You are ${distanceToNextQr.toStringAsFixed(0)} meters from ${_qrData[nextQrId]['name']}. Please scan the QR code.";
+        } else {
+          announcement = "You are ${distanceToNextQr.toStringAsFixed(0)} meters from ${_qrData[nextQrId]['name']}. Head forward.";
+        }
+        await _speak(announcement);
+        lastAnnouncement = DateTime.now();
+        lastDistance = distanceToNextQr;
+      }
+    }, onError: (error) {
+      print('Location stream error: $error');
+      _speak("Error tracking your location. Please ensure GPS is enabled.");
+    });
+
+    await Future.doWhile(() async {
+      await Future.delayed(const Duration(seconds: 1));
+      return _isNavigating;
+    });
+
+    positionStream.cancel();
   }
 
-  Future<void> _waitForNextQrOrFallback(String expectedQrId, LatLng nextQrPos) async {
-    const timeout = Duration(seconds: 120);
-    DateTime startTime = DateTime.now();
+  Future<void> _provideQrToQrInstructions(String currentQrId, String nextQrId) async {
+    LatLng currentPos = LatLng(_qrData[currentQrId]['current_location'][0], _qrData[currentQrId]['current_location'][1]);
+    LatLng nextPos = LatLng(_qrData[nextQrId]['current_location'][0], _qrData[nextQrId]['current_location'][1]);
+    var directionsResult = await getDirectionsWithSteps(currentPos, nextPos, apiKey);
+    List<String> steps = directionsResult['directions'];
 
-    while (_isNavigating && _lastDetectedQrId != expectedQrId) {
-      if (_currentPosition != null) {
-        double distanceToNextQr = Geolocator.distanceBetween(
-          _currentPosition!.latitude,
-          _currentPosition!.longitude,
-          nextQrPos.latitude,
-          nextQrPos.longitude,
-        );
-        if (distanceToNextQr > 150) {
-          await _speak("You are off the QR path. Switching to GPS navigation.");
-          await _fetchAndSpeakDirections(
-            LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-            _destination!,
-          );
-          return;
-        }
-      }
-
-      if (DateTime.now().difference(startTime) > timeout) {
-        await _speak("No QR detected recently. Please scan the next QR or I’ll switch to GPS.");
-        startTime = DateTime.now();
-        await Future.delayed(const Duration(seconds: 10));
-        if (_lastDetectedQrId != expectedQrId) {
-          await _fetchAndSpeakDirections(
-            _currentPosition != null
-                ? LatLng(_currentPosition!.latitude, _currentPosition!.longitude)
-                : nextQrPos,
-            _destination!,
-          );
-          return;
-        }
-      }
-
-      await Future.delayed(const Duration(seconds: 1));
+    await _speak("From ${_qrData[currentQrId]['name']} to ${_qrData[nextQrId]['name']}:");
+    for (int j = 0; j < steps.length && _isNavigating; j++) {
+      String refinedStep = _refineDirection(steps[j]);
+      await _speak("Step ${j + 1}: $refinedStep");
+      if (j < steps.length - 1) await _speak("next");
     }
+    await _speak("Proceed and scan the QR code at ${_qrData[nextQrId]['name']} when you arrive.");
   }
 
   Future<void> _reloadQrData() async {
     await _loadQrData();
     setState(() {
-      _addMarkers(); // Refresh markers on the map
-      buildQrGraph(); // Rebuild the QR graph
+      _addMarkers();
+      buildQrGraph();
     });
   }
 
@@ -1331,41 +1631,42 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           ),
         );
         break;
-      case 'Admin Panel': // Updated name
+      case 'Admin Panel':
         Navigator.of(context).push(
           MaterialPageRoute(
-            builder: (context) => AdminPanelScreen(themeProvider: widget.themeProvider), // Updated reference
+            builder: (context) => AdminPanelScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)), // Updated
           ),
         );
         break;
       case 'Settings':
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (context) => SettingsScreen(themeProvider: widget.themeProvider),
+          builder: (context) => SettingsScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)), // Updated
         ));
         break;
       case 'Help':
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (context) => HelpScreen(themeProvider: widget.themeProvider),
+          builder: (context) => HelpScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)), // Updated
         ));
         break;
       case 'About':
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (context) => AboutScreen(themeProvider: widget.themeProvider),
+          builder: (context) => AboutScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)), // Updated
         ));
         break;
     }
   }
 
   Widget _buildDrawerItem(String title, IconData icon) {
+    final themeProvider = Provider.of<ThemeProvider>(context, listen: false); // Updated
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
       leading: Icon(
         icon,
-        color: widget.themeProvider.isDarkMode ? Colors.white : Colors.blue,
+        color: themeProvider.isDarkMode ? Colors.white : Colors.blue,
       ),
       title: Text(
         title,
-        style: TextStyle(color: widget.themeProvider.isDarkMode ? Colors.white : Colors.black),
+        style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
       ),
       onTap: () => _onDrawerItemTap(title),
     );
@@ -1373,13 +1674,14 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
   @override
   Widget build(BuildContext context) {
+    final themeProvider = Provider.of<ThemeProvider>(context);
     return Scaffold(
       appBar: AppBar(
         title: const Text(
           'Blind Navigation App',
           style: TextStyle(color: Colors.black87),
         ),
-        backgroundColor: widget.themeProvider.isDarkMode ? Colors.black87 : Colors.blue,
+        backgroundColor: themeProvider.isDarkMode ? Colors.black87 : Colors.blue,
         actions: [
           IconButton(
             icon: const Icon(Icons.map),
@@ -1401,25 +1703,25 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           children: [
             DrawerHeader(
               decoration: BoxDecoration(
-                color: widget.themeProvider.isDarkMode ? Colors.black : Colors.blue,
+                color: themeProvider.isDarkMode ? Colors.black : Colors.blue,
               ),
               child: Stack(
                 fit: StackFit.expand,
                 children: [
                   Positioned.fill(
                     child: Opacity(
-                      opacity: 0.7,
-                      child: Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+                      opacity: 1,
+                      child: Image.asset('assets/map.png', fit: BoxFit.cover),
                     ),
                   ),
                   Center(
                     child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 2.0, sigmaY: 2.0),
+                      filter: ImageFilter.blur(sigmaX: 0.0, sigmaY: 0.0),
                       child: Container(
-                        color: Colors.blue.withOpacity(0.2),
+                        color: Colors.black.withOpacity(0.2),
                         padding: const EdgeInsets.all(5.0),
                         child: const Text(
-                          'Navi App',
+                          'HAIM App',
                           style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
                         ),
                       ),
@@ -1433,7 +1735,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
             _buildDrawerItem('Settings', Icons.settings),
             _buildDrawerItem('Help', Icons.help),
             _buildDrawerItem('About', Icons.info),
-            _buildDrawerItem('Admin Panel', Icons.admin_panel_settings), // Updated name
+            _buildDrawerItem('Admin Panel', Icons.admin_panel_settings),
           ],
         ),
       ),
@@ -1476,30 +1778,13 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
             ),
           ),
           Positioned(
-            top: 720,
-            left: 16,
-            right: 16,
-            child: Container(
-              padding: const EdgeInsets.all(8.0),
-              decoration: BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                _recognizedText,
-                style: const TextStyle(color: Colors.white, fontSize: 16),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          ),
-          Positioned(
             bottom: 5,
             left: 16,
             right: 16,
             child: Container(
               padding: const EdgeInsets.all(12.0),
               decoration: BoxDecoration(
-                color: widget.themeProvider.isDarkMode ? Colors.black54 : Colors.black54,
+                color: themeProvider.isDarkMode ? Colors.black54 : Colors.black54,
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
@@ -1517,7 +1802,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                             style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
-                              color: widget.themeProvider.isDarkMode ? Colors.white70 : Colors.white,
+                              color: themeProvider.isDarkMode ? Colors.white70 : Colors.white,
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -1526,7 +1811,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                             style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
-                              color: widget.themeProvider.isDarkMode ? Colors.white70 : Colors.white,
+                              color: themeProvider.isDarkMode ? Colors.white70 : Colors.white,
                             ),
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -1542,12 +1827,18 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                               style: TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.bold,
-                                color: widget.themeProvider.isDarkMode ? Colors.white70 : Colors.white,
+                                color: themeProvider.isDarkMode ? Colors.white70 : Colors.white,
                               ),
                             ),
                             const SizedBox(height: 4),
-                            const Text("Type: TripuraUni", style: TextStyle(fontSize: 14, color: Colors.white)),
-                            Text("ID: $_lastDetectedQrId", style: const TextStyle(fontSize: 14, color: Colors.white)),
+                            Text(
+                              _qrData[_lastDetectedQrId]['name'],
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: themeProvider.isDarkMode ? Colors.white70 : Colors.white,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ],
                         ),
                     ],
@@ -1563,7 +1854,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                             style: TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.bold,
-                              color: widget.themeProvider.isDarkMode ? Colors.white70 : Colors.white,
+                              color: themeProvider.isDarkMode ? Colors.white70 : Colors.white,
                             ),
                           ),
                           const SizedBox(height: 4),
@@ -1576,7 +1867,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                                 label: Text(
                                   obj,
                                   style: TextStyle(
-                                    color: widget.themeProvider.isDarkMode ? Colors.white70 : Colors.white,
+                                    color: themeProvider.isDarkMode ? Colors.white70 : Colors.white,
                                     fontSize: 14,
                                   ),
                                 ),
@@ -1590,6 +1881,18 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
                       ),
                     ),
                   ],
+                  if (_isListening)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8.0),
+                      child: Text(
+                        "Listening: $_recognizedText",
+                        style: const TextStyle(
+                          fontSize: 16,
+                          color: Colors.greenAccent,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -1780,71 +2083,129 @@ class QRLocationScreen extends StatelessWidget {
 
 class SettingsScreen extends StatefulWidget {
   final ThemeProvider themeProvider;
+
   const SettingsScreen({super.key, required this.themeProvider});
 
   @override
-  _SettingsScreenState createState() => _SettingsScreenState();
+  State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  late double _distanceThreshold;
+  late double _speechRate;
+  late int _vibrationDuration;
+  late int _announcementInterval;
+
+  @override
+  void initState() {
+    super.initState();
+    _distanceThreshold = widget.themeProvider.distanceThreshold;
+    _speechRate = widget.themeProvider.speechRate;
+    _vibrationDuration = widget.themeProvider.vibrationDuration;
+    _announcementInterval = widget.themeProvider.announcementInterval;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final themeProvider = widget.themeProvider;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Settings'),
-        backgroundColor: Theme.of(context).brightness == Brightness.dark ? Colors.black87 : Colors.blue,
+        backgroundColor: themeProvider.isDarkMode ? Colors.black87 : Colors.blue,
       ),
-      body: SingleChildScrollView(
+      body: Padding(
         padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: ListView(
           children: [
-            Text(
-              'Customize Your Experience',
-              style: TextStyle(
-                fontSize: 26,
-                fontWeight: FontWeight.bold,
-                color: Theme.of(context).brightness == Brightness.dark ? Colors.white : Colors.blue,
+            SwitchListTile(
+              title: Text(
+                'Dark Mode',
+                style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
               ),
+              value: themeProvider.isDarkMode,
+              onChanged: (value) {
+                themeProvider.toggleTheme();
+              },
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 20),
             Text(
-              'Adjust settings to suit your preferences.',
-              style: TextStyle(
-                fontSize: 16,
-                color: Theme.of(context).brightness == Brightness.dark ? Colors.white70 : Colors.black87,
-              ),
+              'Distance Threshold (cm): ${_distanceThreshold.toStringAsFixed(1)}',
+              style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
             ),
-            const SizedBox(height: 24),
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8.0),
-              child: ListTile(
-                leading: Icon(
-                  Icons.dark_mode,
-                  color: Theme.of(context).brightness == Brightness.dark ? Colors.white70 : Colors.blue,
-                  size: 28,
-                ),
-                title: Text(
-                  'Dark Mode',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                    color: Theme.of(context).brightness == Brightness.dark ? Colors.white : Colors.black87,
-                  ),
-                ),
-                trailing: Switch(
-                  value: widget.themeProvider.isDarkMode,
-                  onChanged: (value) async {
-                    await widget.themeProvider.toggleTheme();
-                    setState(() {});
-                  },
-                  activeColor: Colors.blue,
-                ),
-                tileColor: Theme.of(context).brightness == Brightness.dark ? Colors.grey[800] : Colors.grey[100],
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
+            Slider(
+              value: _distanceThreshold,
+              min: 10.0,
+              max: 200.0,
+              divisions: 190,
+              label: _distanceThreshold.toStringAsFixed(1),
+              onChanged: (value) {
+                setState(() {
+                  _distanceThreshold = value;
+                });
+              },
+              onChangeEnd: (value) {
+                themeProvider.setDistanceThreshold(value);
+              },
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Speech Rate: ${_speechRate.toStringAsFixed(2)}',
+              style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
+            ),
+            Slider(
+              value: _speechRate,
+              min: 0.1,
+              max: 1.0,
+              divisions: 9,
+              label: _speechRate.toStringAsFixed(2),
+              onChanged: (value) {
+                setState(() {
+                  _speechRate = value;
+                });
+              },
+              onChangeEnd: (value) {
+                themeProvider.setSpeechRate(value);
+              },
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Vibration Duration (ms): $_vibrationDuration',
+              style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
+            ),
+            Slider(
+              value: _vibrationDuration.toDouble(),
+              min: 100,
+              max: 1000,
+              divisions: 9,
+              label: _vibrationDuration.toString(),
+              onChanged: (value) {
+                setState(() {
+                  _vibrationDuration = value.toInt();
+                });
+              },
+              onChangeEnd: (value) {
+                themeProvider.setVibrationDuration(value.toInt());
+              },
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Announcement Interval (s): $_announcementInterval',
+              style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
+            ),
+            Slider(
+              value: _announcementInterval.toDouble(),
+              min: 1,
+              max: 10,
+              divisions: 9,
+              label: _announcementInterval.toString(),
+              onChanged: (value) {
+                setState(() {
+                  _announcementInterval = value.toInt();
+                });
+              },
+              onChangeEnd: (value) {
+                themeProvider.setAnnouncementInterval(value.toInt());
+              },
             ),
           ],
         ),
