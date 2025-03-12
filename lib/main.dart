@@ -169,6 +169,10 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   DateTime? _lastObjectAnnouncementTime;
   PorcupineManager? _porcupineManager;
   bool _isPorcupineActive = false;
+  bool _motionDetected = false;
+  String _motionDirection = "";
+  List<int> _motionCentroid = [0, 0];
+  Map<String, dynamic> _movingObject = {'object': '', 'confidence': 0.0};
 
   final List<Landmark> landmarks = [];
 
@@ -722,9 +726,19 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         double newDistance = data['distance_cm'];
         List<String> newDetectedObjects = List<String>.from(data['objects'].map((obj) => obj['object']));
 
+        // Parse motion data
+        bool motionDetected = data['motion']['detected'];
+        String motionDirection = data['motion']['direction'];
+        List<int> motionCentroid = List<int>.from(data['motion']['centroid']);
+        Map<String, dynamic> movingObject = data['motion']['moving_object'] ?? {'object': '', 'confidence': 0.0};
+
         setState(() {
           _distanceFromSensor = newDistance;
           _detectedObjects = newDetectedObjects;
+          _motionDetected = motionDetected;
+          _motionDirection = motionDirection;
+          _motionCentroid = motionCentroid;
+          _movingObject = movingObject;
         });
 
         final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
@@ -1723,6 +1737,21 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           builder: (context) => AboutScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)),
         ));
         break;
+      case 'Server Data':
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (context) => ServerDataScreen(
+              distance: _distanceFromSensor,
+              qrCodes: _qrData[_lastDetectedQrId] != null ? [_qrData[_lastDetectedQrId]['name']] : [],
+              objects: _detectedObjects,
+              motionDetected: _motionDetected,
+              motionDirection: _motionDirection,
+              motionCentroid: _motionCentroid,
+              movingObject: _movingObject,
+            ),
+          ),
+        );
+        break;
     }
   }
 
@@ -1806,6 +1835,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
             _buildDrawerItem('Help', Icons.help),
             _buildDrawerItem('About', Icons.info),
             _buildDrawerItem('Admin Panel', Icons.admin_panel_settings),
+            _buildDrawerItem('Server Data', Icons.data_usage),
           ],
         ),
       ),
@@ -2443,6 +2473,114 @@ class HelpScreen extends StatelessWidget {
                   ),
                 ),
               ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class ServerDataScreen extends StatelessWidget {
+  final double? distance;
+  final List<String> qrCodes;
+  final List<String> objects;
+  final bool motionDetected;
+  final String motionDirection;
+  final List<int> motionCentroid;
+  final Map<String, dynamic> movingObject;
+
+  const ServerDataScreen({
+    super.key,
+    required this.distance,
+    required this.qrCodes,
+    required this.objects,
+    required this.motionDetected,
+    required this.motionDirection,
+    required this.motionCentroid,
+    required this.movingObject,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final themeProvider = Provider.of<ThemeProvider>(context);
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Server Data'),
+        backgroundColor: themeProvider.isDarkMode ? Colors.black87 : Colors.blue,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: StreamBuilder(
+          stream: Stream.periodic(const Duration(seconds: 1))
+              .asyncMap((_) => http.get(Uri.parse('http://192.168.46.92:5000/data'))),
+          builder: (context, snapshot) {
+            if (!snapshot.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (snapshot.hasError) {
+              return Center(child: Text('Error: ${snapshot.error}'));
+            }
+            final response = snapshot.data as http.Response;
+            if (response.statusCode != 200) {
+              return const Center(child: Text('Failed to fetch server data'));
+            }
+            final data = jsonDecode(response.body);
+
+            // Safely extract data with fallbacks
+            final distanceCm = (data['distance_cm'] as num?)?.toStringAsFixed(2) ?? 'N/A';
+            final qrCodesText = (data['qr_codes'] as List?)?.isEmpty ?? true
+                ? 'None'
+                : (data['qr_codes'] as List?)?.map((qr) => qr['qid']?.toString() ?? 'Unknown').join(', ') ?? 'None';
+            final objectsText = (data['objects'] as List?)?.isEmpty ?? true
+                ? 'None'
+                : (data['objects'] as List?)?.map((obj) => obj['object']?.toString() ?? 'Unknown').join(', ') ?? 'None';
+            final motionDetectedText = (data['motion']?['detected'] as bool?)?.toString() ?? 'N/A';
+            final motionDirectionText = data['motion']?['direction']?.toString() ?? 'N/A';
+            final motionCentroidText = (data['motion']?['centroid'] as List?)?.length == 2
+                ? '[${data['motion']['centroid'][0]}, ${data['motion']['centroid'][1]}]'
+                : 'N/A';
+            final movingObjectText = data['motion']?['moving_object'] != null &&
+                data['motion']['moving_object']['object'] != null
+                ? '${data['motion']['moving_object']['object']} (${(data['motion']['moving_object']['confidence'] as num?)?.toStringAsFixed(2)}%)'
+                : 'None';
+
+            return ListView(
+              children: [
+                _buildDataItem('Distance (cm)', distanceCm, themeProvider),
+                _buildDataItem('QR Codes', qrCodesText, themeProvider),
+                _buildDataItem('Objects', objectsText, themeProvider),
+                _buildDataItem('Motion Detected', motionDetectedText, themeProvider),
+                _buildDataItem('Motion Direction', motionDirectionText, themeProvider),
+                _buildDataItem('Motion Centroid', motionCentroidText, themeProvider),
+                _buildDataItem('Moving Object', movingObjectText, themeProvider),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDataItem(String label, String value, ThemeProvider themeProvider) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: themeProvider.isDarkMode ? Colors.white : Colors.black,
+            ),
+          ),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 16,
+              color: themeProvider.isDarkMode ? Colors.white70 : Colors.black87,
             ),
           ),
         ],
