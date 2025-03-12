@@ -601,18 +601,25 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     }
   }
 
-  Future<void> _speak(String text) async {
-    print("Speaking: $text");
+  Future<void> _speak(String text, {bool priority = false}) async {
+    print("Speaking: $text, Priority: $priority");
     if (!_ttsInitialized) {
       print("TTS not initialized yet, queuing: $text");
       _ttsQueue.add(text);
       return;
     }
 
-    _ttsQueue.add(text);
-    await _flutterTts.stop();
-    if (_isTtsSpeaking) {
+    if (priority) {
+      // Stop current speech immediately for priority announcements
+      await _flutterTts.stop();
+      _ttsQueue.clear(); // Clear queue to ensure priority takes precedence
       _isTtsSpeaking = false;
+    } else {
+      _ttsQueue.add(text);
+    }
+
+    if (_isTtsSpeaking && !priority) {
+      return; // Non-priority messages wait in queue
     }
 
     while (_ttsQueue.isNotEmpty) {
@@ -720,17 +727,23 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
   Future<void> _fetchDistance() async {
     try {
-      final response = await http.get(Uri.parse('http://192.168.46.92:5000/data'));
+      final response = await http.get(Uri.parse('http://192.168.209.92:5000/data'));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        double newDistance = data['distance_cm'];
-        List<String> newDetectedObjects = List<String>.from(data['objects'].map((obj) => obj['object']));
 
-        // Parse motion data
-        bool motionDetected = data['motion']['detected'];
-        String motionDirection = data['motion']['direction'];
-        List<int> motionCentroid = List<int>.from(data['motion']['centroid']);
-        Map<String, dynamic> movingObject = data['motion']['moving_object'] ?? {'object': '', 'confidence': 0.0};
+        // Safely parse data with null handling
+        double? newDistance = (data['distance_cm'] as num?)?.toDouble();
+        List<String> newDetectedObjects = (data['objects'] as List?)
+            ?.map((obj) => (obj['object'] as String?) ?? 'Unknown')
+            .toList() ?? [];
+
+        // Parse motion data with null safety
+        bool motionDetected = data['motion']?['detected'] as bool? ?? false;
+        String motionDirection = data['motion']?['direction'] as String? ?? '';
+        List<int> motionCentroid = (data['motion']?['centroid'] as List?)
+            ?.map((e) => e as int)
+            .toList() ?? [0, 0];
+        Map<String, dynamic> movingObject = data['motion']?['moving_object'] as Map<String, dynamic>? ?? {'object': '', 'confidence': 0.0};
 
         setState(() {
           _distanceFromSensor = newDistance;
@@ -741,6 +754,13 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           _movingObject = movingObject;
         });
 
+        // Motion detection TTS notification
+        if (motionDetected && (movingObject['object'] as String?)?.isNotEmpty == true && motionDirection.isNotEmpty) {
+          String motionText = "${movingObject['object']} detected moving $motionDirection";
+          await _speak(motionText, priority: true); // Priority TTS for motion
+        }
+
+        // Existing logic continues after TTS
         final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
         bool isBelowThreshold = _distanceFromSensor != null && _distanceFromSensor! < themeProvider.distanceThreshold;
 
@@ -761,7 +781,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           if (shouldAnnounce) {
             if (_detectedObjects.isNotEmpty) {
               String objectsText = _detectedObjects.join(", ") + " detected";
-              _speak(objectsText);
+              _speak(objectsText); // Non-priority, queues after motion
             } else {
               _speak("An obstacle is in front of you, but no specific objects detected.");
             }
@@ -771,7 +791,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           _lastAnnouncedBelowThreshold = false;
         }
 
-        if (data['qr_codes'] != null && data['qr_codes'].isNotEmpty) {
+        if (data['qr_codes'] != null && (data['qr_codes'] as List).isNotEmpty) {
           for (var qr in data['qr_codes']) {
             if (qr['type'] == "TripuraUni") {
               if (_lastDetectedQrId != qr['qid']) {
@@ -2513,7 +2533,7 @@ class ServerDataScreen extends StatelessWidget {
         padding: const EdgeInsets.all(16.0),
         child: StreamBuilder(
           stream: Stream.periodic(const Duration(seconds: 1))
-              .asyncMap((_) => http.get(Uri.parse('http://192.168.46.92:5000/data'))),
+              .asyncMap((_) => http.get(Uri.parse('http://192.168.209.92:5000/data'))),
           builder: (context, snapshot) {
             if (!snapshot.hasData) {
               return const Center(child: CircularProgressIndicator());
