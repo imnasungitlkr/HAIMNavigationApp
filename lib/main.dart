@@ -171,8 +171,12 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   bool _isPorcupineActive = false;
   bool _motionDetected = false;
   String _motionDirection = "";
-  List<int> _motionCentroid = [0, 0];
-  Map<String, dynamic> _movingObject = {'object': '', 'confidence': 0.0};
+  String _movingObjectName = ''; // Simplified from Map if confidence isn't needed
+  DateTime? _lastMotionAnnouncement; // Renamed for clarity
+  static const Duration _motionDebounceDuration = Duration(seconds: 3); // Debounce duration
+  List<int> _motionCentroid = [0, 0]; // Only if used elsewhere (e.g., ServerDataScreen)
+  String? _interruptedText; // For resuming interrupted TTS
+  double? _interruptedProgress; // For resuming interrupted TTS
 
   final List<Landmark> landmarks = [];
 
@@ -602,41 +606,81 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   }
 
   Future<void> _speak(String text, {bool priority = false}) async {
-    print("Speaking: $text, Priority: $priority");
+    print("Speaking: $text, Priority: $priority, TTS Initialized: $_ttsInitialized, Speaking: $_isTtsSpeaking");
     if (!_ttsInitialized) {
       print("TTS not initialized yet, queuing: $text");
       _ttsQueue.add(text);
       return;
     }
 
-    if (priority) {
-      // Stop current speech immediately for priority announcements
+    // Handle priority (e.g., motion announcements)
+    if (priority && _isTtsSpeaking) {
       await _flutterTts.stop();
-      _ttsQueue.clear(); // Clear queue to ensure priority takes precedence
+      if (_ttsQueue.isNotEmpty) {
+        _interruptedText = _ttsQueue.removeFirst(); // Save interrupted text
+        _interruptedProgress = 0.0; // Placeholder; enhance if progress tracking available
+        print("Interrupted TTS: $_interruptedText at progress $_interruptedProgress");
+      }
       _isTtsSpeaking = false;
-    } else {
-      _ttsQueue.add(text);
+    } else if (!priority && _isTtsSpeaking) {
+      _ttsQueue.add(text); // Queue non-priority text
+      print("TTS busy, queued: $text");
+      return;
     }
 
-    if (_isTtsSpeaking && !priority) {
-      return; // Non-priority messages wait in queue
-    }
-
-    while (_ttsQueue.isNotEmpty) {
+    // Process priority text or queue
+    if (priority) {
+      _ttsQueue.clear(); // Clear queue for priority
       _isTtsSpeaking = true;
-      String next = _ttsQueue.removeFirst();
       Completer<void> completer = Completer<void>();
       _flutterTts.setCompletionHandler(() {
+        print("TTS completed: $text");
         completer.complete();
       });
-      await _flutterTts.speak(next);
+      _flutterTts.setErrorHandler((msg) {
+        print("TTS error: $msg");
+        completer.completeError(Exception(msg));
+      });
+      await _flutterTts.speak(text);
       await completer.future.catchError((e) {
-        print("TTS error: $e");
+        print("TTS execution failed: $e");
         completer.complete();
       });
-      await Future.delayed(const Duration(milliseconds: 300));
+      _isTtsSpeaking = false;
+
+      // Resume interrupted TTS
+      if (_interruptedText != null) {
+        String remainingText = _interruptedText!; // Full text if no progress tracking
+        print("Resuming interrupted TTS: $remainingText");
+        await _speak(remainingText); // Recursive call for remaining text
+        _interruptedText = null;
+        _interruptedProgress = null;
+      }
+    } else {
+      _ttsQueue.add(text);
+      while (_ttsQueue.isNotEmpty) {
+        _isTtsSpeaking = true;
+        String next = _ttsQueue.removeFirst();
+        print("Attempting to speak: $next");
+        Completer<void> completer = Completer<void>();
+        _flutterTts.setCompletionHandler(() {
+          print("TTS completed: $next");
+          completer.complete();
+        });
+        _flutterTts.setErrorHandler((msg) {
+          print("TTS error: $msg");
+          completer.completeError(Exception(msg));
+        });
+        await _flutterTts.speak(next);
+        await completer.future.catchError((e) {
+          print("TTS execution failed: $e");
+          completer.complete();
+        });
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+      _isTtsSpeaking = false;
     }
-    _isTtsSpeaking = false;
+    print("TTS finished speaking");
   }
 
   Future<void> _loadQrData() async {
@@ -731,43 +775,51 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
 
-        // Safely parse data with null handling
+        // Parse data
         double? newDistance = (data['distance_cm'] as num?)?.toDouble();
         List<String> newDetectedObjects = (data['objects'] as List?)
             ?.map((obj) => (obj['object'] as String?) ?? 'Unknown')
             .toList() ?? [];
-
-        // Parse motion data with null safety
         bool motionDetected = data['motion']?['detected'] as bool? ?? false;
         String motionDirection = data['motion']?['direction'] as String? ?? '';
+        String movingObjectName = data['motion']?['moving_object']?['object'] as String? ?? 'unknown object';
+        // Optional: Keep these if used elsewhere
         List<int> motionCentroid = (data['motion']?['centroid'] as List?)
             ?.map((e) => e as int)
             .toList() ?? [0, 0];
-        Map<String, dynamic> movingObject = data['motion']?['moving_object'] as Map<String, dynamic>? ?? {'object': '', 'confidence': 0.0};
 
+        // Update state
         setState(() {
           _distanceFromSensor = newDistance;
           _detectedObjects = newDetectedObjects;
           _motionDetected = motionDetected;
           _motionDirection = motionDirection;
+          _movingObjectName = movingObjectName;
+          // Optional: Update these if retained
           _motionCentroid = motionCentroid;
-          _movingObject = movingObject;
         });
 
-        // Motion detection TTS notification
-        if (motionDetected && (movingObject['object'] as String?)?.isNotEmpty == true && motionDirection.isNotEmpty) {
-          String motionText = "${movingObject['object']} detected moving $motionDirection";
-          await _speak(motionText, priority: true); // Priority TTS for motion
+        // Immediate motion announcement (only if moving)
+        if (_motionDetected && _motionDirection.isNotEmpty && _motionDirection.toLowerCase() != 'stationary') { // Check for non-stationary
+          final now = DateTime.now();
+          String motionText = "$_movingObjectName detected moving $_motionDirection";
+          const Duration motionDebounceDuration = Duration(seconds: 6); // Increased to 6 seconds
+          if (_lastMotionAnnouncement == null || now.difference(_lastMotionAnnouncement!) >= motionDebounceDuration) {
+            print("Triggering immediate TTS: $motionText");
+            await _speak(motionText, priority: true); // Full announcement completes
+            _lastMotionAnnouncement = now;
+          } else {
+            print("Motion announcement debounced: $motionText");
+            // Removed queuing to avoid overlap; rely on debounce
+          }
         }
 
-        // Existing logic continues after TTS
+        // Existing obstacle detection logic
         final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
         bool isBelowThreshold = _distanceFromSensor != null && _distanceFromSensor! < themeProvider.distanceThreshold;
-
         if (isBelowThreshold && await Vibration.hasVibrator()) {
           Vibration.vibrate(duration: themeProvider.vibrationDuration);
         }
-
         if (isBelowThreshold && !_isTtsSpeaking) {
           bool shouldAnnounce = false;
           if (!_lastAnnouncedBelowThreshold) {
@@ -777,11 +829,10 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
               DateTime.now().difference(_lastObjectAnnouncementTime!).inSeconds >= themeProvider.announcementInterval) {
             shouldAnnounce = true;
           }
-
           if (shouldAnnounce) {
             if (_detectedObjects.isNotEmpty) {
               String objectsText = _detectedObjects.join(", ") + " detected";
-              _speak(objectsText); // Non-priority, queues after motion
+              _speak(objectsText); // Queued, resumes after motion
             } else {
               _speak("An obstacle is in front of you, but no specific objects detected.");
             }
@@ -791,6 +842,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           _lastAnnouncedBelowThreshold = false;
         }
 
+        // QR code handling (unchanged)
         if (data['qr_codes'] != null && (data['qr_codes'] as List).isNotEmpty) {
           for (var qr in data['qr_codes']) {
             if (qr['type'] == "TripuraUni") {
@@ -806,7 +858,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           }
         }
       } else {
-        print('Failed to load distance data');
+        print('Failed to load distance data: HTTP ${response.statusCode}');
       }
     } catch (e) {
       print('Error fetching distance: $e');
@@ -1767,7 +1819,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
               motionDetected: _motionDetected,
               motionDirection: _motionDirection,
               motionCentroid: _motionCentroid,
-              movingObject: _movingObject,
+              movingObjectName: _movingObjectName,
             ),
           ),
         );
@@ -2508,7 +2560,7 @@ class ServerDataScreen extends StatelessWidget {
   final bool motionDetected;
   final String motionDirection;
   final List<int> motionCentroid;
-  final Map<String, dynamic> movingObject;
+  final String movingObjectName;
 
   const ServerDataScreen({
     super.key,
@@ -2518,7 +2570,7 @@ class ServerDataScreen extends StatelessWidget {
     required this.motionDetected,
     required this.motionDirection,
     required this.motionCentroid,
-    required this.movingObject,
+    required this.movingObjectName,
   });
 
   @override
@@ -2531,52 +2583,16 @@ class ServerDataScreen extends StatelessWidget {
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
-        child: StreamBuilder(
-          stream: Stream.periodic(const Duration(seconds: 1))
-              .asyncMap((_) => http.get(Uri.parse('http://192.168.209.92:5000/data'))),
-          builder: (context, snapshot) {
-            if (!snapshot.hasData) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            if (snapshot.hasError) {
-              return Center(child: Text('Error: ${snapshot.error}'));
-            }
-            final response = snapshot.data as http.Response;
-            if (response.statusCode != 200) {
-              return const Center(child: Text('Failed to fetch server data'));
-            }
-            final data = jsonDecode(response.body);
-
-            // Safely extract data with fallbacks
-            final distanceCm = (data['distance_cm'] as num?)?.toStringAsFixed(2) ?? 'N/A';
-            final qrCodesText = (data['qr_codes'] as List?)?.isEmpty ?? true
-                ? 'None'
-                : (data['qr_codes'] as List?)?.map((qr) => qr['qid']?.toString() ?? 'Unknown').join(', ') ?? 'None';
-            final objectsText = (data['objects'] as List?)?.isEmpty ?? true
-                ? 'None'
-                : (data['objects'] as List?)?.map((obj) => obj['object']?.toString() ?? 'Unknown').join(', ') ?? 'None';
-            final motionDetectedText = (data['motion']?['detected'] as bool?)?.toString() ?? 'N/A';
-            final motionDirectionText = data['motion']?['direction']?.toString() ?? 'N/A';
-            final motionCentroidText = (data['motion']?['centroid'] as List?)?.length == 2
-                ? '[${data['motion']['centroid'][0]}, ${data['motion']['centroid'][1]}]'
-                : 'N/A';
-            final movingObjectText = data['motion']?['moving_object'] != null &&
-                data['motion']['moving_object']['object'] != null
-                ? '${data['motion']['moving_object']['object']} (${(data['motion']['moving_object']['confidence'] as num?)?.toStringAsFixed(2)}%)'
-                : 'None';
-
-            return ListView(
-              children: [
-                _buildDataItem('Distance (cm)', distanceCm, themeProvider),
-                _buildDataItem('QR Codes', qrCodesText, themeProvider),
-                _buildDataItem('Objects', objectsText, themeProvider),
-                _buildDataItem('Motion Detected', motionDetectedText, themeProvider),
-                _buildDataItem('Motion Direction', motionDirectionText, themeProvider),
-                _buildDataItem('Motion Centroid', motionCentroidText, themeProvider),
-                _buildDataItem('Moving Object', movingObjectText, themeProvider),
-              ],
-            );
-          },
+        child: ListView(  // Replace StreamBuilder with static data
+          children: [
+            _buildDataItem('Distance (cm)', distance?.toStringAsFixed(2) ?? 'N/A', themeProvider),
+            _buildDataItem('QR Codes', qrCodes.isEmpty ? 'None' : qrCodes.join(', '), themeProvider),
+            _buildDataItem('Objects', objects.isEmpty ? 'None' : objects.join(', '), themeProvider),
+            _buildDataItem('Motion Detected', motionDetected.toString(), themeProvider),
+            _buildDataItem('Motion Direction', motionDirection.isEmpty ? 'N/A' : motionDirection, themeProvider),
+            _buildDataItem('Motion Centroid', motionCentroid.length == 2 ? '[${motionCentroid[0]}, ${motionCentroid[1]}]' : 'N/A', themeProvider),
+            _buildDataItem('Moving Object', movingObjectName.isEmpty ? 'None' : movingObjectName, themeProvider),
+          ],
         ),
       ),
     );
