@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "15635716227",
+    "project_id": "haim-e5164",
+    "storage_bucket": "haim-e5164.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:15635716227:android:879d56d88d58bd062963b6",
+        "android_client_info": {
+          "package_name": "com.example.blind_navigation_flutter"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA6HrrbUb2Rsjt4wRru4Xhg_3nn_Zh1M9o"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

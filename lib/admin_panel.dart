@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:saver_gallery/saver_gallery.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/services.dart' show rootBundle; // Add this for loading assets
 
 import 'main.dart'; // Import ThemeProvider and qrDataChangedNotifier
@@ -69,12 +70,29 @@ class AdminPanelScreenState extends State<AdminPanelScreen> {
 
   Future<void> _saveQrData() async {
     final prefs = await SharedPreferences.getInstance();
+    final firestore = FirebaseFirestore.instance;
+
+    // Save to Firestore using a batch for efficiency
+    WriteBatch batch = firestore.batch();
+    _qrData.forEach((qrId, qrInfo) {
+      var docRef = firestore.collection('qr_codes').doc(qrId);
+      batch.set(docRef, {
+        'id': qrId,
+        'name': qrInfo['name'],
+        'current_location': qrInfo['current_location'],
+        'context': qrInfo['context'],
+        'neighbours': qrInfo['neighbours'],
+      }, SetOptions(merge: true));
+    });
+    await batch.commit();
+
+    // Save locally
     await prefs.setString('qrData', jsonEncode(_qrData));
     final directory = await getApplicationDocumentsDirectory();
     String saveLocation = '${directory.path}/qr_data.json';
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('QR data saved to internal storage: $saveLocation')),
+        SnackBar(content: Text('QR data saved to cloud and internal storage: $saveLocation')),
       );
     }
     _clearFields();

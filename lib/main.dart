@@ -19,6 +19,8 @@ import 'package:flutter/foundation.dart';
 import 'package:porcupine_flutter/porcupine_manager.dart'; // Added for Porcupine
 import 'admin_panel.dart';
 import 'config.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 // Global notifier for QR data changes
 final ValueNotifier<bool> qrDataChangedNotifier = ValueNotifier(false);
@@ -83,6 +85,7 @@ class ThemeProvider extends ChangeNotifier {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
   final themeProvider = ThemeProvider();
   await themeProvider.loadTheme();
   runApp(
@@ -173,10 +176,11 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   String _motionDirection = "";
   String _movingObjectName = ''; // Simplified from Map if confidence isn't needed
   DateTime? _lastMotionAnnouncement; // Renamed for clarity
-  static const Duration _motionDebounceDuration = Duration(seconds: 3); // Debounce duration
+  bool _isMotionAnnouncementInProgress = false;
   List<int> _motionCentroid = [0, 0]; // Only if used elsewhere (e.g., ServerDataScreen)
   String? _interruptedText; // For resuming interrupted TTS
   double? _interruptedProgress; // For resuming interrupted TTS
+  final ValueNotifier<bool> qrDataChangedNotifier = ValueNotifier(false);
 
   final List<Landmark> landmarks = [];
 
@@ -384,8 +388,8 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (!_isNavigating && !_awaitingDestination) {
         await _speak("How may I help you?");
         await Future.delayed(const Duration(milliseconds: 300));
-        await _speak("Microphone is on, speak now.");
-        await Future.delayed(const Duration(milliseconds: 300));
+        //await _speak("Microphone is on, speak now.");
+        //await Future.delayed(const Duration(milliseconds: 300));
       }
 
       _speech.listen(
@@ -635,18 +639,18 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       Completer<void> completer = Completer<void>();
       _flutterTts.setCompletionHandler(() {
         print("TTS completed: $text");
+        _isTtsSpeaking = false; // Reset speaking state here
         completer.complete();
       });
       _flutterTts.setErrorHandler((msg) {
         print("TTS error: $msg");
+        _isTtsSpeaking = false; // Reset on error
         completer.completeError(Exception(msg));
       });
       await _flutterTts.speak(text);
       await completer.future.catchError((e) {
         print("TTS execution failed: $e");
-        completer.complete();
       });
-      _isTtsSpeaking = false;
 
       // Resume interrupted TTS
       if (_interruptedText != null) {
@@ -658,27 +662,27 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       }
     } else {
       _ttsQueue.add(text);
-      while (_ttsQueue.isNotEmpty) {
+      while (_ttsQueue.isNotEmpty && !_isTtsSpeaking) { // Add check to prevent overlap
         _isTtsSpeaking = true;
         String next = _ttsQueue.removeFirst();
         print("Attempting to speak: $next");
         Completer<void> completer = Completer<void>();
         _flutterTts.setCompletionHandler(() {
           print("TTS completed: $next");
+          _isTtsSpeaking = false; // Reset speaking state here
           completer.complete();
         });
         _flutterTts.setErrorHandler((msg) {
           print("TTS error: $msg");
+          _isTtsSpeaking = false; // Reset on error
           completer.completeError(Exception(msg));
         });
         await _flutterTts.speak(next);
         await completer.future.catchError((e) {
           print("TTS execution failed: $e");
-          completer.complete();
         });
         await Future.delayed(const Duration(milliseconds: 300));
       }
-      _isTtsSpeaking = false;
     }
     print("TTS finished speaking");
   }
@@ -686,12 +690,57 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   Future<void> _loadQrData() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      final firestore = FirebaseFirestore.instance;
+
+      // Fetch from Firestore
+      QuerySnapshot snapshot = await firestore.collection('qr_codes').get();
+      Map<String, dynamic> cloudData = {};
+      for (var doc in snapshot.docs) {
+        var data = doc.data() as Map<String, dynamic>;
+        // Normalize data to ensure compatibility with _addMarkers()
+        cloudData[doc['id']] = {
+          'name': data['name'] ?? '',
+          'current_location': (data['current_location'] is List)
+              ? List<double>.from(data['current_location'].map((e) => e is num ? e.toDouble() : 0.0))
+              : [0.0, 0.0], // Fallback if format is wrong
+          'context': data['context'] ?? '',
+          'neighbours': data['neighbours'] ?? [],
+        };
+      }
+      print('Cloud data fetched: $cloudData');
+
+      // Load local data
+      String? savedQrData = prefs.getString('qrData');
+      Map<String, dynamic> localData = savedQrData != null ? jsonDecode(savedQrData) : {};
+      print('Local data: $localData');
+
+      // Compare and update if different
+      if (!_areMapsEqual(localData, cloudData)) {
+        setState(() {
+          _qrData = cloudData;
+        });
+        await prefs.setString('qrData', jsonEncode(_qrData));
+        buildQrGraph();
+        await _speak("QR data updated from cloud.");
+        print('Updated _qrData from cloud: $_qrData');
+      } else {
+        setState(() {
+          _qrData = localData.isNotEmpty ? localData : cloudData;
+        });
+        buildQrGraph();
+        print('Updated _qrData from local/cloud: $_qrData');
+      }
+    } catch (e) {
+      print('Error loading QR data: $e');
+      await _speak("Failed to load QR data from cloud. Using local data if available.");
+      final prefs = await SharedPreferences.getInstance();
       String? savedQrData = prefs.getString('qrData');
       if (savedQrData != null) {
         setState(() {
           _qrData = jsonDecode(savedQrData);
           buildQrGraph();
         });
+        print('Fallback to local data: $_qrData');
       } else {
         String jsonString = await rootBundle.loadString('assets/qrdata.json');
         setState(() {
@@ -699,11 +748,25 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           buildQrGraph();
         });
         await prefs.setString('qrData', jsonString);
+        print('Fallback to asset data: $_qrData');
       }
-    } catch (e) {
-      print('Error loading QR data: $e');
-      _speak("Failed to load QR data.");
     }
+  }
+
+  bool _areMapsEqual(Map<String, dynamic> local, Map<String, dynamic> cloud) {
+    if (local.length != cloud.length) return false;
+    for (String key in local.keys) {
+      if (!cloud.containsKey(key)) return false;
+      var localVal = local[key];
+      var cloudVal = cloud[key];
+      if (localVal['name'] != cloudVal['name'] ||
+          !listEquals(localVal['current_location'], cloudVal['current_location']) ||
+          localVal['context'] != cloudVal['context'] ||
+          !listEquals(localVal['neighbours'], cloudVal['neighbours'])) {
+        return false;
+      }
+    }
+    return true;
   }
 
   void buildQrGraph() {
@@ -775,7 +838,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
 
-        // Parse data
+        // Parse data (unchanged)
         double? newDistance = (data['distance_cm'] as num?)?.toDouble();
         List<String> newDetectedObjects = (data['objects'] as List?)
             ?.map((obj) => (obj['object'] as String?) ?? 'Unknown')
@@ -783,38 +846,46 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         bool motionDetected = data['motion']?['detected'] as bool? ?? false;
         String motionDirection = data['motion']?['direction'] as String? ?? '';
         String movingObjectName = data['motion']?['moving_object']?['object'] as String? ?? 'unknown object';
-        // Optional: Keep these if used elsewhere
         List<int> motionCentroid = (data['motion']?['centroid'] as List?)
             ?.map((e) => e as int)
             .toList() ?? [0, 0];
 
-        // Update state
+        // Update state (unchanged)
         setState(() {
           _distanceFromSensor = newDistance;
           _detectedObjects = newDetectedObjects;
           _motionDetected = motionDetected;
           _motionDirection = motionDirection;
           _movingObjectName = movingObjectName;
-          // Optional: Update these if retained
           _motionCentroid = motionCentroid;
         });
 
-        // Immediate motion announcement (only if moving)
-        if (_motionDetected && _motionDirection.isNotEmpty && _motionDirection.toLowerCase() != 'stationary') { // Check for non-stationary
+        // Motion announcement logic
+        if (_motionDetected && _motionDirection.isNotEmpty && _motionDirection.toLowerCase() != 'stationary') {
           final now = DateTime.now();
           String motionText = "$_movingObjectName detected moving $_motionDirection";
-          const Duration motionDebounceDuration = Duration(seconds: 6); // Increased to 6 seconds
-          if (_lastMotionAnnouncement == null || now.difference(_lastMotionAnnouncement!) >= motionDebounceDuration) {
-            print("Triggering immediate TTS: $motionText");
-            await _speak(motionText, priority: true); // Full announcement completes
-            _lastMotionAnnouncement = now;
+          const Duration motionDebounceDuration = Duration(seconds: 6);
+
+          // Check if we can announce (not in progress and debounce period has passed)
+          if (!_isMotionAnnouncementInProgress &&
+              (_lastMotionAnnouncement == null || now.difference(_lastMotionAnnouncement!) >= motionDebounceDuration)) {
+            setState(() {
+              _isMotionAnnouncementInProgress = true; // Lock announcements
+            });
+
+            print("Triggering full TTS: $motionText");
+            await _speak(motionText, priority: true); // Speak with priority
+
+            setState(() {
+              _isMotionAnnouncementInProgress = false; // Unlock after completion
+              _lastMotionAnnouncement = DateTime.now(); // Update timestamp after full announcement
+            });
           } else {
-            print("Motion announcement debounced: $motionText");
-            // Removed queuing to avoid overlap; rely on debounce
+            print("Motion announcement skipped: In progress ($_isMotionAnnouncementInProgress) or debounced");
           }
         }
 
-        // Existing obstacle detection logic
+        // Existing obstacle detection logic (unchanged)
         final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
         bool isBelowThreshold = _distanceFromSensor != null && _distanceFromSensor! < themeProvider.distanceThreshold;
         if (isBelowThreshold && await Vibration.hasVibrator()) {
@@ -862,6 +933,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       }
     } catch (e) {
       print('Error fetching distance: $e');
+      setState(() {
+        _isMotionAnnouncementInProgress = false; // Reset on error
+      });
     }
   }
 
@@ -1391,28 +1465,30 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   void _addMarkers() {
     setState(() {
       _markers.clear();
-    });
-
-    _loadQrData().then((_) {
+      print('Cleared markers, rebuilding from _qrData: ${_qrData.length} entries');
       _qrData.forEach((qrId, qrInfo) {
-        final position = LatLng(
-          qrInfo['current_location'][0],
-          qrInfo['current_location'][1],
-        );
-        setState(() {
+        try {
+          final position = LatLng(
+            qrInfo['current_location'][0] as double,
+            qrInfo['current_location'][1] as double,
+          );
           _markers.add(
             Marker(
               markerId: MarkerId(qrId),
               position: position,
               infoWindow: InfoWindow(
-                title: qrInfo['name'],
-                snippet: qrInfo['context'],
+                title: qrInfo['name'] as String? ?? qrId,
+                snippet: qrInfo['context'] as String?,
               ),
               icon: qrPinIcon,
             ),
           );
-        });
+          print('Added marker: $qrId at $position');
+        } catch (e) {
+          print('Error adding marker $qrId: $e');
+        }
       });
+      print('Total markers: ${_markers.length}');
     });
   }
 
@@ -1660,6 +1736,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   }
 
   Future<void> _reloadQrData() async {
+    print('reloadQrData triggered');
     await _loadQrData();
     setState(() {
       _addMarkers();
@@ -1792,7 +1869,12 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           MaterialPageRoute(
             builder: (context) => AdminPanelScreen(themeProvider: Provider.of<ThemeProvider>(context, listen: false)),
           ),
-        );
+        ).then((_) {
+          if (mounted) {
+            _reloadQrData(); // Trigger reload on return
+            print('Manual refresh after AdminPanelScreen');
+          }
+        });
         break;
       case 'Settings':
         Navigator.of(context).push(MaterialPageRoute(
@@ -1923,7 +2005,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
               myLocationButtonEnabled: false,
               trafficEnabled: _isTrafficEnabled,
               initialCameraPosition: CameraPosition(target: _initialPosition, zoom: 15),
-              markers: _markers,
+              markers: Set<Marker>.of(_markers),
               polylines: _polylines,
               onTap: (LatLng position) {
                 _setDestination(gpsDestination: position);
