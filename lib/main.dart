@@ -1019,13 +1019,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (path.isNotEmpty) {
         int currentIndex = path.indexOf(scannedQr);
         if (currentIndex == path.length - 1) {
-          await _speak("You have reached your destination: ${_qrData[scannedQr]['name']}.");
+          await _speak("${_qrData[scannedQr]['name']} reached");
           await _stopNavigation();
-        } else if (currentIndex >= 0 && currentIndex < path.length - 1) {
-          String nextQr = path[currentIndex + 1];
-          await _speak("You’ve reached ${_qrData[scannedQr]['name']}.");
-          await _provideQrToQrInstructions(scannedQr, nextQr); // Step-by-step instructions
-        } else {
+        } else if (currentIndex < 0) {
           await _speak("You are off course. Recalculating path.");
           if (_currentPosition != null) {
             await _fetchAndSpeakDirections(
@@ -1034,6 +1030,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
             );
           }
         }
+        // No else needed; _startPathNavigation handles the "You are at [location]. Go [direction]..." announcement
       } else {
         await _speak("You are off course. Switching to GPS navigation.");
         if (_currentPosition != null) {
@@ -1546,19 +1543,14 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       return;
     }
 
-    List<LatLng> pathPoints = [];
-    List<String> directions = [];
-    for (int i = 0; i < qrPath.length - 1; i++) {
-      LatLng startPos = LatLng(_qrData[qrPath[i]]['current_location'][0], _qrData[qrPath[i]]['current_location'][1]);
-      LatLng endPos = LatLng(_qrData[qrPath[i + 1]]['current_location'][0], _qrData[qrPath[i + 1]]['current_location'][1]);
-      var result = await getDirectionsWithSteps(startPos, endPos, apiKey);
-      pathPoints.addAll(result['polylinePoints']);
-      directions.addAll(result['directions']);
-    }
+    // Set up QR waypoints for visualization (optional)
+    List<LatLng> pathPoints = qrPath.map((qrId) => LatLng(
+        _qrData[qrId]['current_location'][0],
+        _qrData[qrId]['current_location'][1])).toList();
 
     setState(() {
       _polylines.clear();
-      _polylinePoints = pathPoints;
+      _polylinePoints = pathPoints; // Simplified to QR points only
       _polylines.add(Polyline(
         polylineId: const PolylineId('qr_route'),
         points: _polylinePoints,
@@ -1577,12 +1569,12 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       }
     });
 
-    // Start navigation with QR path
-    await _startPathNavigation(directions: directions, qrPath: qrPath);
+    // Start navigation with QR path only (no detailed directions)
+    await _startPathNavigation(qrPath: qrPath);
   }
 
   Future<void> _startPathNavigation({List<String>? directions, List<String>? qrPath}) async {
-    if (_polylinePoints.isEmpty && (directions == null || directions.isEmpty) && (qrPath == null || qrPath.isEmpty)) {
+    if ((qrPath == null || qrPath.isEmpty) && (directions == null || directions.isEmpty)) {
       await _speak("No valid path available. Please set a destination.");
       return;
     }
@@ -1593,11 +1585,10 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
     StreamSubscription<Position>? positionStream;
     DateTime lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 2));
-    int currentStepIndex = 0; // Tracks progress along the route
-    const double offRouteThreshold = 10.0; // 10-meter tolerance from the path (already updated per Step 1)
-    const double waypointThreshold = 5.0; // Distance to consider a waypoint "reached"
+    int currentStepIndex = 0; // Tracks the current QR waypoint
+    const double waypointThreshold = 5.0; // Distance to consider a QR point "reached"
+    const double headingTolerance = 45.0; // ±45° tolerance for "parallel" heading
     const int updateInterval = 3; // Announce every 3 seconds
-    bool isOffRoute = false;
 
     positionStream = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
@@ -1610,12 +1601,12 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         return;
       }
 
-      _getCurrentLocation(position);
+      _getCurrentLocation(position); // Updates _currentPosition
       LatLng currentPos = LatLng(position.latitude, position.longitude);
 
-      _provideContextualInfo(position);
+      _provideContextualInfo(position); // Announce nearby QR codes if applicable
 
-      // Define waypoints based on QR path or polyline points
+      // Use QR waypoints if in QR mode, otherwise fall back to GPS polyline points
       List<LatLng> waypoints = qrPath != null && qrPath.isNotEmpty
           ? qrPath.map((qrId) => LatLng(
           _qrData[qrId]['current_location'][0],
@@ -1647,7 +1638,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         return;
       }
 
-      // Check distance to the current target waypoint
+      // Get the target QR waypoint
       LatLng targetWaypoint = waypoints[currentStepIndex];
       double distanceToTarget = Geolocator.distanceBetween(
         currentPos.latitude,
@@ -1656,7 +1647,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         targetWaypoint.longitude,
       );
 
-      // Advance to the next waypoint if close enough
+      // Advance to the next QR waypoint if close enough
       if (distanceToTarget <= waypointThreshold) {
         currentStepIndex++;
         if (currentStepIndex >= waypoints.length) {
@@ -1680,17 +1671,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         }
       }
 
-      // Check if off-route by measuring distance to the segment between last and next waypoint
-      double minDistanceToRoute = double.infinity;
-      if (currentStepIndex > 0) {
-        minDistanceToRoute = _distanceToSegment(currentPos, waypoints[currentStepIndex - 1], waypoints[currentStepIndex]);
-      } else {
-        minDistanceToRoute = distanceToTarget;
-      }
-
-      isOffRoute = minDistanceToRoute > offRouteThreshold;
-
-      // Calculate bearing to the target waypoint
+      // Calculate bearing to the target QR waypoint
       double bearingToTarget = Geolocator.bearingBetween(
         currentPos.latitude,
         currentPos.longitude,
@@ -1699,77 +1680,39 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       );
       if (bearingToTarget < 0) bearingToTarget += 360;
 
-      // Calculate off-route bearing (to the last waypoint if off-route)
-      double bearingToRoute = bearingToTarget;
-      if (isOffRoute && currentStepIndex > 0) {
-        bearingToRoute = Geolocator.bearingBetween(
-          currentPos.latitude,
-          currentPos.longitude,
-          waypoints[currentStepIndex - 1].latitude,
-          waypoints[currentStepIndex - 1].longitude,
-        );
-        if (bearingToRoute < 0) bearingToRoute += 360;
-      }
-
       // Determine direction based on user heading
-      /*String direction = "Keep straight"; // Default when heading unavailable
-      String offRouteDirection = "Adjust back"; // Default off-route instruction
+      String direction = "Continue straight"; // Default
+      bool isOnCourse = true;
       if (_userHeading != null) {
-        // Calculate heading difference for on-route direction
         double headingDiff = bearingToTarget - _userHeading!;
         if (headingDiff < -180) headingDiff += 360;
         if (headingDiff > 180) headingDiff -= 360;
 
-        // Off-route correction direction
-        if (isOffRoute) {
-          double offRouteDiff = bearingToRoute - _userHeading!;
-          if (offRouteDiff < -180) offRouteDiff += 360;
-          if (offRouteDiff > 180) offRouteDiff -= 360;
-
-          if (offRouteDiff > 67.5) {
-            offRouteDirection = "Adjust right";
-          } else if (offRouteDiff > 22.5) {
-            offRouteDirection = "Adjust slightly right";
-          } else if (offRouteDiff > 5) {
-            offRouteDirection = "Adjust very slightly right";
-          } else if (offRouteDiff < -67.5) {
-            offRouteDirection = "Adjust left";
-          } else if (offRouteDiff < -22.5) {
-            offRouteDirection = "Adjust slightly left";
-          } else if (offRouteDiff < -5) {
-            offRouteDirection = "Adjust very slightly left";
-          }
-          direction = offRouteDirection; // Override direction with off-route instruction
-        } else {
-          // On-route direction with tolerance
-          if (headingDiff.abs() <= 15) {
-            direction = "Continue straight";
-          } else if (headingDiff > 135 || headingDiff < -135) {
-            direction = "Turn around";
-          } else if (headingDiff > 67.5) {
-            direction = "Turn right";
-          } else if (headingDiff > 15) {
-            direction = "Slight right";
-          } else if (headingDiff < -67.5) {
-            direction = "Turn left";
-          } else if (headingDiff < -15) {
-            direction = "Slight left";
-          }
+        // Check if the user is "parallel" to the route (within ±45°)
+        if (headingDiff.abs() <= headingTolerance) {
+          direction = "Continue straight toward ${_qrData[qrPath![currentStepIndex]]['name']}";
+        } else if (headingDiff > 135 || headingDiff < -135) {
+          direction = "Turn around to head toward ${_qrData[qrPath![currentStepIndex]]['name']}";
+          isOnCourse = false;
+        } else if (headingDiff > headingTolerance) {
+          direction = headingDiff > 90
+              ? "Turn right to head toward ${_qrData[qrPath![currentStepIndex]]['name']}"
+              : "Adjust slightly right to head toward ${_qrData[qrPath![currentStepIndex]]['name']}";
+          isOnCourse = false;
+        } else if (headingDiff < -headingTolerance) {
+          direction = headingDiff < -90
+              ? "Turn left to head toward ${_qrData[qrPath![currentStepIndex]]['name']}"
+              : "Adjust slightly left to head toward ${_qrData[qrPath![currentStepIndex]]['name']}";
+          isOnCourse = false;
         }
       }
 
-      // Construct instruction
-      String instruction = "";
-      if (isOffRoute) {
-        instruction = "$direction to return to the path"; // Using direction directly since it’s set to offRouteDirection
+      // Construct instruction with distance
+      String instruction = direction;
+      if (isOnCourse) {
+        instruction += " for ${distanceToTarget.toStringAsFixed(0)} meters";
       } else {
-        if (direction == "Continue straight") {
-          instruction = "Continue straight";
-        } else if (distanceToTarget <= 20.0) {
-          instruction = "$direction in ${distanceToTarget.toStringAsFixed(0)} meters";
-        } else {
-          instruction = "$direction for ${distanceToTarget.toStringAsFixed(0)} meters";
-        }
+        instruction += ", approximately ${distanceToTarget.toStringAsFixed(0)} meters away";
       }
 
       // Announce if ready
@@ -1777,8 +1720,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (shouldAnnounce) {
         await _speak(instruction);
         lastAnnouncement = DateTime.now();
-      }*/
+      }
 
+      // Update polyline for visualization (optional, not used for navigation logic)
       _updatePolyline(position);
     }, onError: (error) {
       print('Location stream error: $error');
@@ -1793,20 +1737,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     positionStream?.cancel();
   }
 
-  Future<void> _provideQrToQrInstructions(String currentQrId, String nextQrId) async {
-    LatLng currentPos = LatLng(_qrData[currentQrId]['current_location'][0], _qrData[currentQrId]['current_location'][1]);
-    LatLng nextPos = LatLng(_qrData[nextQrId]['current_location'][0], _qrData[nextQrId]['current_location'][1]);
-    var directionsResult = await getDirectionsWithSteps(currentPos, nextPos, apiKey);
-    List<String> steps = directionsResult['directions'];
-
-    await _speak("From ${_qrData[currentQrId]['name']} to ${_qrData[nextQrId]['name']}:");
-    for (int j = 0; j < steps.length && _isNavigating; j++) {
-      String refinedStep = _refineDirection(steps[j]);
-      await _speak("Step ${j + 1}: $refinedStep");
-      //if (j < steps.length - 1) await _speak("next");
-    }
-    await _speak("Proceed and scan the QR code at ${_qrData[nextQrId]['name']} when you arrive.");
-  }
 
   Future<void> _reloadQrData() async {
     print('reloadQrData triggered');
@@ -2786,7 +2716,7 @@ class ServerDataScreen extends StatelessWidget {
               _buildDataItem('Motion Direction', motionDirection.isEmpty ? 'N/A' : motionDirection, themeProvider),
               _buildDataItem('Motion Centroid', motionCentroid.length == 2 ? '[${motionCentroid[0]}, ${motionCentroid[1]}]' : 'N/A', themeProvider),
               _buildDataItem('Moving Object', movingObjectName.isEmpty ? 'None' : movingObjectName, themeProvider),
-              _buildDataItem('Version:', 'curry', themeProvider), // version checker
+              _buildDataItem('Version:', 'hasim', themeProvider), // version checker
             ],
           )
       ),
