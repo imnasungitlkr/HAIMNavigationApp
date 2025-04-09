@@ -694,22 +694,21 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       Map<String, dynamic> cloudData = {};
       for (var doc in snapshot.docs) {
         var data = doc.data() as Map<String, dynamic>;
-        // Normalize data to ensure compatibility with _addMarkers()
         cloudData[doc['id']] = {
           'name': data['name'] ?? '',
           'current_location': (data['current_location'] is List)
               ? List<double>.from(data['current_location'].map((e) => e is num ? e.toDouble() : 0.0))
-              : [0.0, 0.0], // Fallback if format is wrong
+              : [0.0, 0.0],
           'context': data['context'] ?? '',
           'neighbours': data['neighbours'] ?? [],
         };
       }
-      print('Cloud data fetched: $cloudData');
+      print('Loaded from Firestore: $cloudData'); // Debug: Confirm cloud data
 
       // Load local data
       String? savedQrData = prefs.getString('qrData');
       Map<String, dynamic> localData = savedQrData != null ? jsonDecode(savedQrData) : {};
-      print('Local data: $localData');
+      print('Loaded from SharedPreferences: $localData'); // Debug: Confirm local data
 
       // Compare and update if different
       if (!_areMapsEqual(localData, cloudData)) {
@@ -719,16 +718,16 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         await prefs.setString('qrData', jsonEncode(_qrData));
         buildQrGraph();
         await _speak("QR data updated from cloud.");
-        print('Updated _qrData from cloud: $_qrData');
+        print('Synced _qrData with cloud: $_qrData');
       } else {
         setState(() {
           _qrData = localData.isNotEmpty ? localData : cloudData;
         });
         buildQrGraph();
-        print('Updated _qrData from local/cloud: $_qrData');
+        print('Using existing _qrData: $_qrData');
       }
     } catch (e) {
-      print('Error loading QR data: $e');
+      print('Error loading QR data from cloud: $e');
       await _speak("Failed to load QR data from cloud. Using local data if available.");
       final prefs = await SharedPreferences.getInstance();
       String? savedQrData = prefs.getString('qrData');
@@ -1441,7 +1440,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           print('Error adding marker $qrId: $e');
         }
       });
-      print('Total markers: ${_markers.length}');
+      print('Total markers rebuilt: ${_markers.length}');
     });
   }
 
@@ -2716,7 +2715,7 @@ class ServerDataScreen extends StatelessWidget {
               _buildDataItem('Motion Direction', motionDirection.isEmpty ? 'N/A' : motionDirection, themeProvider),
               _buildDataItem('Motion Centroid', motionCentroid.length == 2 ? '[${motionCentroid[0]}, ${motionCentroid[1]}]' : 'N/A', themeProvider),
               _buildDataItem('Moving Object', movingObjectName.isEmpty ? 'None' : movingObjectName, themeProvider),
-              _buildDataItem('Version:', 'hasim', themeProvider), // version checker
+              _buildDataItem('Version:', 'deletion', themeProvider), // version checker
             ],
           )
       ),

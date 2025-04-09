@@ -72,29 +72,39 @@ class AdminPanelScreenState extends State<AdminPanelScreen> {
     final prefs = await SharedPreferences.getInstance();
     final firestore = FirebaseFirestore.instance;
 
-    // Save to Firestore using a batch for efficiency
-    WriteBatch batch = firestore.batch();
-    _qrData.forEach((qrId, qrInfo) {
-      var docRef = firestore.collection('qr_codes').doc(qrId);
-      batch.set(docRef, {
-        'id': qrId,
-        'name': qrInfo['name'],
-        'current_location': qrInfo['current_location'],
-        'context': qrInfo['context'],
-        'neighbours': qrInfo['neighbours'],
-      }, SetOptions(merge: true));
-    });
-    await batch.commit();
+    try {
+      // Save to Firestore using a batch for efficiency
+      WriteBatch batch = firestore.batch();
+      _qrData.forEach((qrId, qrInfo) {
+        var docRef = firestore.collection('qr_codes').doc(qrId);
+        batch.set(docRef, {
+          'id': qrId,
+          'name': qrInfo['name'],
+          'current_location': qrInfo['current_location'],
+          'context': qrInfo['context'],
+          'neighbours': qrInfo['neighbours'],
+        }, SetOptions(merge: true));
+      });
+      await batch.commit();
 
-    // Save locally
-    await prefs.setString('qrData', jsonEncode(_qrData));
-    final directory = await getApplicationDocumentsDirectory();
-    String saveLocation = '${directory.path}/qr_data.json';
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('QR data saved to cloud and internal storage: $saveLocation')),
-      );
+      // Save locally only if Firestore succeeds
+      await prefs.setString('qrData', jsonEncode(_qrData));
+      final directory = await getApplicationDocumentsDirectory();
+      String saveLocation = '${directory.path}/qr_data.json';
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('QR data saved to cloud and internal storage: $saveLocation')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to save QR data: $e')),
+        );
+      }
+      return; // Exit early on error
     }
+
     _clearFields();
     qrDataChangedNotifier.value = !qrDataChangedNotifier.value; // Notify listeners of QR data change
   }
@@ -177,18 +187,31 @@ class AdminPanelScreenState extends State<AdminPanelScreen> {
             ),
             ElevatedButton(
               onPressed: () {
-                setState(() {
-                  _qrData.remove(qrId);
-                });
-                _saveQrData();
-                Navigator.of(dialogContext).pop();
+                Navigator.of(dialogContext).pop(true);
               },
               child: const Text('Delete'),
             ),
           ],
         );
       },
-    );
+    ).then((result) async {
+      if (result == true) {
+        final firestore = FirebaseFirestore.instance;
+        WriteBatch batch = firestore.batch();
+        var docRef = firestore.collection('qr_codes').doc(qrId);
+
+        batch.delete(docRef);
+        await batch.commit();
+
+        if (mounted) {
+          setState(() {
+            _qrData.remove(qrId);
+          });
+        }
+
+        await _saveQrData();
+      }
+    });
   }
 
   Future<ui.Image> _loadImage(String assetPath) async {
