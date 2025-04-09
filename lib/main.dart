@@ -2715,7 +2715,7 @@ class ServerDataScreen extends StatelessWidget {
               _buildDataItem('Motion Direction', motionDirection.isEmpty ? 'N/A' : motionDirection, themeProvider),
               _buildDataItem('Motion Centroid', motionCentroid.length == 2 ? '[${motionCentroid[0]}, ${motionCentroid[1]}]' : 'N/A', themeProvider),
               _buildDataItem('Moving Object', movingObjectName.isEmpty ? 'None' : movingObjectName, themeProvider),
-              _buildDataItem('Version:', 'deletion', themeProvider), // version checker
+              _buildDataItem('Version:', 'gitgit', themeProvider), // version checker
             ],
           )
       ),
