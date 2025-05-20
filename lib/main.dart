@@ -22,6 +22,7 @@ import 'config.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_compass/flutter_compass.dart'; // Replace sensors_plus
+import 'navigation_assistant.dart';
 
 // Global notifier for QR data changes
 final ValueNotifier<bool> qrDataChangedNotifier = ValueNotifier(false);
@@ -167,33 +168,34 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   String _recognizedText = '';
   bool _ttsInitialized = false;
   DateTime _lastDirectionFetch = DateTime.now();
-  final Duration _debounceDuration = Duration(seconds: 10);
+  final Duration _debounceDuration = const Duration(seconds: 10);
   bool _awaitingGpsSwitchResponse = false;
-  bool _lastAnnouncedBelowThreshold = false;
-  DateTime? _lastObjectAnnouncementTime;
   PorcupineManager? _porcupineManager;
   bool _isPorcupineActive = false;
   bool _motionDetected = false;
   String _motionDirection = "";
   String _movingObjectName = ''; // Simplified from Map if confidence isn't needed
   DateTime? _lastMotionAnnouncement; // Renamed for clarity
-  bool _isMotionAnnouncementInProgress = false;
   List<int> _motionCentroid = [0, 0]; // Only if used elsewhere (e.g., ServerDataScreen)
-  String? _interruptedText; // For resuming interrupted TTS
-  double? _interruptedProgress; // For resuming interrupted TTS
   final ValueNotifier<bool> qrDataChangedNotifier = ValueNotifier(false);
   double? _userHeading; // User's current heading in degrees (0-360)
   StreamSubscription<CompassEvent>? _compassSubscription; // Updated for flutter_compass
   bool _isStopping = false;
-  bool _isTtsSuppressed = false; // New flag to suppress TTS during voice interaction
   DateTime? _lastVibrationTime;
   bool _isProcessingQr = false;
   DateTime? _lastManualScanTime; // Tracks last manual scan time
-  final Duration _manualScanOverrideDuration = Duration(seconds: 20); // Duration to prioritize manual scans
+  final Duration _manualScanOverrideDuration = const Duration(seconds: 15); // Duration to prioritize manual scans
   List<String> _qrScanQueue = []; // Queue for manual QR scans
   DateTime? _lastProximityCheck; // Tracks last proximity check for debouncing
   bool _isNewNavigation = false; // Tracks if navigation is newly started or recalculated
   StreamSubscription<Position>? _positionStream; // Declare position stream
+  String? _currentTtsText; // Tracks the currently spoken TTS text
+  String? _lastAnnouncementText; // Tracks the last announced text for debouncing
+  DateTime? _lastAnnouncementTime;
+  final NavigationAssistant _navigationAssistant = NavigationAssistant();
+  bool _isUserInteractionActive = false; // New flag for STT/instruction processing
+  String? _lastManualScanQrId; // Tracks the QR ID of the last manual scan
+
 
   final List<Landmark> landmarks = [];
 
@@ -214,6 +216,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   Future<void> _initializeApp() async {
     // Step 1: Initialize TTS and speak welcome message
     await _initializeTts();
+    await Future.delayed(const Duration(milliseconds: 500));
     await _speak("Welcome to the Blind Navigation App. Say 'Hey Coco' or press the microphone button to begin.");
 
     // Step 2: Load QR data and other setup
@@ -237,22 +240,23 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
   // Initialize Porcupine for wake word detection
   Future<void> _initializePorcupine() async {
+    await Future.delayed(const Duration(milliseconds: 500)); // Slight delay to reduce main thread load
     try {
       _porcupineManager = await PorcupineManager.fromKeywordPaths(
-        "7tWk5dPHECjbjqu9XalqySvx/CgIIoBw6AtPCt57CesqALrWg9fF5Q==",
-        ["assets/hey-coco_en_android_v3_0_0.ppn"],
+        "OvTGqLwZjKOUcjX1yw3otlghy8bvxCzAjG8nKjzVj+iW6kQMHdBkMQ==",
+        ["assets/Hey-coco_en_android_v3_0_0.ppn"],
             (int keywordIndex) {
-          if (keywordIndex == 0) { // "Hey Coco" detected
+          if (keywordIndex == 0) {
             print("Wake word 'Hey Coco' detected");
-            _handleWakeWordDetection(); // New handler for wake word
+            _handleWakeWordDetection();
           }
         },
       );
       await _porcupineManager?.start();
       _isPorcupineActive = true;
       print("Porcupine wake word detection started");
-    } catch (e) {
-      print("Error initializing Porcupine: $e");
+    } catch (e, stackTrace) {
+      print("Error initializing Porcupine: $e\nStackTrace: $stackTrace");
       await _speak("Failed to initialize wake word detection.");
     }
   }
@@ -263,27 +267,24 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       _isPorcupineActive = false;
       print("Porcupine stopped for command input");
 
-      // Stop current TTS and suppress new TTS
-      await _flutterTts.stop();
-      await _flutterTts.awaitSpeakCompletion(true);
-      _isTtsSpeaking = false;
-      setState(() => _isTtsSuppressed = true); // Suppress TTS from processes
-      print("TTS stopped and suppressed due to wake word detection");
+      // Stop current TTS, clear queue, and mark interaction active
+      await _navigationAssistant.stop();
+      setState(() {
+        _ttsQueue.clear();
+        _isTtsSpeaking = false;
+        _isUserInteractionActive = true;
+      });
+      print("TTS stopped, queue cleared, and interaction marked active due to wake word detection");
 
       // Start voice interaction
       await _startVoiceInteraction();
-
-      // Resume TTS after interaction (handled in _startVoiceInteraction)
     }
   }
 
   Future<void> _initializeTts() async {
-    await _flutterTts.setLanguage("en-US");
-    await _flutterTts.setSpeechRate(Provider.of<ThemeProvider>(context, listen: false).speechRate);
-    await _flutterTts.setVolume(1.0);
-    await _flutterTts.setPitch(1.0);
+    await _navigationAssistant.updateSpeechRate(Provider.of<ThemeProvider>(context, listen: false).speechRate);
     _ttsInitialized = true;
-    print("TTS Initialized");
+    print("TTS Initialized via NavigationAssistant");
   }
 
   Future<void> _initializeSpeech() async {
@@ -342,8 +343,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       setState(() {
         _isListening = false;
         _recognizedText = '';
+        _isUserInteractionActive = false;
       });
-      print("Stopped listening");
+      print("Stopped listening, interaction ended, TTS enabled with fresh queue");
 
       // Restart Porcupine
       Future.delayed(const Duration(seconds: 1), _restartPorcupine);
@@ -392,38 +394,98 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
     command = command.toLowerCase().trim();
 
-    if (_awaitingDestination) {
-      print("Awaiting destination, handling: '$command'");
-      await _handleDestinationCommand(command);
-    } else if (_awaitingGpsSwitchResponse) {
-      print("Awaiting GPS switch response, handling: '$command'");
-      await _handleGpsSwitchResponse(command);
-    } else {
-      print("Passing to processCommand: '$command'");
-      await _processCommand(command);
-    }
+    try {
+      // Reset interaction state early to allow _setDestination
+      setState(() => _isUserInteractionActive = false);
 
-    // Resume TTS queue if suppressed
-    if (_isTtsSuppressed) {
-      setState(() => _isTtsSuppressed = false);
-      if (_ttsQueue.isNotEmpty && !_isTtsSpeaking) {
-        _speakNextInQueue();
+      if (_awaitingDestination) {
+        print("Awaiting destination, handling: '$command'");
+        // Map destination to QR ID
+        String? qrId = _mapDestinationToQrId(command);
+        if (qrId != null) {
+          await _setDestination(qrId: qrId);
+          if (_destinationQrId == qrId && _isNavigating) {
+            await _speak("Destination set to ${_qrData[qrId]['name']}. Follow the QR path.", priority: true);
+          } else {
+            //await _speak("Failed to set destination. Please try again.", priority: true);
+          }
+        } else {
+          await _speak(
+            "I couldn’t find that destination. Please say a valid location like 'Cottage' or 'Library'.",
+            priority: true,
+          );
+          setState(() => _awaitingDestination = true); // Keep awaiting
+        }
+      } else if (_awaitingGpsSwitchResponse) {
+        debugPrint("Awaiting GPS switch response, handling: '$command'");
+        await _handleGpsSwitchResponse(command);
+      } else {
+        debugPrint("Passing to processCommand: '$command'");
+        if (command.contains('set destination')) {
+          // Handle destination command directly
+          String destination = command.replaceFirst('set destination', '').trim();
+          String? qrId = _mapDestinationToQrId(destination);
+          if (qrId != null) {
+            await _setDestination(qrId: qrId);
+            if (_destinationQrId == qrId && _isNavigating) {
+              await _speak("Destination set to ${_qrData[qrId]['name']}. Follow the QR path.", priority: true);
+            } else {
+              //await _speak("Failed to set destination. Please try again.", priority: true);
+            }
+          } else {
+            await _speak(
+              "I couldn’t find that destination. Please say a valid location like 'Cottage' or 'Library'.",
+              priority: true,
+            );
+            setState(() => _awaitingDestination = true);
+          }
+        } else {
+          await _processCommand(command);
+        }
       }
-      print("TTS suppression lifted after command: ${_ttsQueue.length} items");
+    } finally {
+      // Wait for any ongoing TTS to complete
+      while (_navigationAssistant.isSpeaking) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      // Reset voice state
+      setState(() {
+        _isUserInteractionActive = false;
+        _isListening = false;
+        // Only reset _awaitingDestination if it wasn’t set above
+        if (!_awaitingDestination) {
+          _awaitingDestination = false;
+        }
+      });
+      print("Voice command processed, interaction ended, TTS enabled with fresh queue");
+      _stopListening();
+      _restartPorcupine();
     }
+  }
 
-    _stopListening();
+// Helper method to map destination to QR ID
+  // Helper method to map destination to QR ID
+  String? _mapDestinationToQrId(String destination) {
+    destination = destination.toLowerCase().trim();
+    for (String qrId in _qrData.keys) {
+      String qrName = _qrData[qrId]['name']?.toLowerCase() ?? '';
+      if (qrName.isNotEmpty && destination.contains(qrName)) {
+        return qrId;
+      }
+    }
+    return null;
   }
 
   Future<void> _startVoiceInteraction() async {
     print("Starting voice interaction, IsNavigating: $_isNavigating");
     if (_speechInitialized && _ttsInitialized) {
-      // Stop current TTS and suppress new TTS
-      await _flutterTts.stop();
-      await _flutterTts.awaitSpeakCompletion(true);
-      _isTtsSpeaking = false;
-      setState(() => _isTtsSuppressed = true); // Suppress TTS from processes
-      print("TTS stopped and suppressed for voice interaction");
+      await _navigationAssistant.stop();
+      setState(() {
+        _ttsQueue.clear();
+        _isTtsSpeaking = false;
+        _isUserInteractionActive = true;
+      });
+      print("TTS stopped, queue cleared, and interaction marked active for voice interaction");
 
       if (_isListening) {
         print("Stopping existing listening session...");
@@ -434,12 +496,23 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (_isPorcupineActive) {
         await _porcupineManager?.stop();
         _isPorcupineActive = false;
-        print("Porcupine stopped for manual microphone activation");
+        debugPrint("Porcupine stopped for manual microphone activation");
       }
 
-      await _speak("How may I help you?", priority: true); // Priority to bypass suppression
-      await Future.delayed(const Duration(milliseconds: 300));
+      print("Speaking prompt: How may I help you?");
+      await _speak("How may I help you?", priority: true);
+      while (_navigationAssistant.isSpeaking) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      print("Prompt completed");
 
+      print("Triggering vibration");
+      if (await Vibration.hasVibrator()) {
+        Vibration.vibrate(pattern: [0, 200, 100, 200]);
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+
+      debugPrint("Starting STT listening");
       _speech.listen(
         onResult: (result) {
           setState(() {
@@ -462,51 +535,23 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         cancelOnError: true,
       );
       setState(() => _isListening = true);
-      if (await Vibration.hasVibrator()) {
-        Vibration.vibrate(pattern: [0, 200, 100, 200]);
-      }
+      print("Listening started");
 
-      // Wait for listening to complete
       await Future.doWhile(() async {
         await Future.delayed(const Duration(milliseconds: 100));
         return _isListening;
       });
 
-      // Resume TTS after interaction
-      setState(() => _isTtsSuppressed = false);
-      if (_ttsQueue.isNotEmpty && !_isTtsSpeaking) {
-        _speakNextInQueue();
-      }
-      print("TTS suppression lifted, resumed queue: ${_ttsQueue.length} items");
+      print("Voice interaction completed, waiting for command processing to finish");
     } else {
       if (!_speechInitialized) {
-        await _speak("Speech recognition is not initialized. Please check permissions.");
+        print("Speech recognition not initialized, speaking error");
+        await _speak("Speech recognition is not initialized. Please check permissions.", priority: true);
       }
       if (!_isPorcupineActive) {
+        print("Restarting Porcupine");
         await _restartPorcupine();
       }
-    }
-  }
-
-  Future<void> _speakNextInQueue() async {
-    while (_ttsQueue.isNotEmpty && !_isTtsSpeaking && !_isStopping) {
-      _isTtsSpeaking = true;
-      String next = _ttsQueue.removeFirst();
-      print("Speaking from resumed queue: $next");
-      Completer<void> completer = Completer<void>();
-      _flutterTts.setCompletionHandler(() {
-        print("TTS completed: $next");
-        _isTtsSpeaking = false;
-        completer.complete();
-      });
-      _flutterTts.setErrorHandler((msg) {
-        print("TTS error: $msg");
-        _isTtsSpeaking = false;
-        completer.completeError(Exception(msg));
-      });
-      await _flutterTts.speak(next);
-      await completer.future.catchError((e) => print("TTS failed: $e"));
-      await Future.delayed(const Duration(milliseconds: 300));
     }
   }
 
@@ -578,23 +623,26 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       if (dest.isNotEmpty) {
         await _handleDestinationCommand(dest);
       } else {
-        await _speak("Where to? Say a place like 'Library' or 'Cafeteria.'");
+        await _speak("Where to? Say a place like 'Library' or 'Cafeteria.'", priority: true);
         _awaitingDestination = true;
       }
     } else if (_isNavigating && stopCommands.any((cmd) => command.contains(cmd))) {
       print("Matched stop command: '$command'");
       await _stopNavigation();
-      await _speak("Navigation stopped.");
+      await _speak("Navigation stopped.", priority: true);
     } else if (objectCommands.any((cmd) => command.contains(cmd))) {
       print("Matched object command: '$command'");
       if (_detectedObjects.isNotEmpty) {
-        await _speak("${_detectedObjects.join(", ")} detected");
+        await _speak("${_detectedObjects.join(", ")} detected", priority: true);
       } else {
-        await _speak("No objects detected in front of you.");
+        await _speak("No objects detected in front of you.", priority: true);
       }
     } else {
       print("Unrecognized command: '$command'");
-      await _speak("I didn’t understand that. Please try again with commands like 'where am I', 'set destination to Library', or 'what is in front of me'.");
+      await _speak(
+        "I didn’t understand that. Please try again with commands like 'where am I', 'set destination to Library', or 'what is in front of me'.",
+        priority: true,
+      );
     }
     setState(() => _recognizedText = '');
   }
@@ -604,13 +652,16 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       LatLng current = LatLng(_currentPosition!.latitude, _currentPosition!.longitude);
       String nearestLandmark = _findNearestLandmark(current);
       if (nearestLandmark.isNotEmpty) {
-        await _speak("You are near $nearestLandmark.");
+        await _speak("You are near $nearestLandmark.", priority: true);
       } else {
-        await _speak("You are at latitude ${_currentPosition!.latitude.toStringAsFixed(4)}, "
-            "longitude ${_currentPosition!.longitude.toStringAsFixed(4)}.");
+        await _speak(
+          "You are at latitude ${_currentPosition!.latitude.toStringAsFixed(4)}, "
+              "longitude ${_currentPosition!.longitude.toStringAsFixed(4)}.",
+          priority: true,
+        );
       }
     } else {
-      await _speak("I can’t determine your location yet. Please wait.");
+      await _speak("I can’t determine your location yet. Please wait.", priority: true);
       await _fetchCurrentLocation();
     }
   }
@@ -666,108 +717,108 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       String nearestQr = currentPos != null ? _findNearestQr(currentPos) : '';
       if (nearestQr.isNotEmpty) {
         await _setDestination(qrId: nearestQr);
-        await _speak("Destination set to nearest QR code: ${_qrData[nearestQr]['name']}");
+        await _speak("Destination set to nearest QR code: ${_qrData[nearestQr]['name']}.", priority: true);
+        if (_lastDetectedQrId != null) {
+          List<String> path = findShortestPath(_lastDetectedQrId!, nearestQr);
+          await _announceQrPath(path);
+        } else {
+          await _speak("Please scan a QR code to start navigation.", priority: true);
+        }
       } else {
-        await _speak("No nearby QR codes found or location unavailable. Please specify a destination or enable GPS.");
+        await _speak(
+          "No nearby QR codes found or location unavailable. Please specify a destination or enable GPS.",
+          priority: true,
+        );
         _awaitingDestination = true;
       }
       return;
     }
 
-    String normalizedInput = destination.toLowerCase().trim();
-    String? matchedQrId;
-
-    _qrData.forEach((qrId, qrInfo) {
-      String qrName = qrInfo['name'].toLowerCase();
-      if (normalizedInput.contains(qrName)) {
-        matchedQrId = qrId;
+    String? qrId = _mapDestinationToQrId(destination);
+    if (qrId != null) {
+      print("Setting destination to QR ID: $qrId");
+      await _setDestination(qrId: qrId);
+      await _speak("Destination set to ${_qrData[qrId]['name']}. Follow the QR path.", priority: true);
+      if (_lastDetectedQrId != null) {
+        List<String> path = findShortestPath(_lastDetectedQrId!, qrId);
+        await _announceQrPath(path);
+      } else {
+        await _speak("Please scan a QR code to start navigation.", priority: true);
       }
-    });
-
-    if (matchedQrId != null) {
-      print("Setting destination to QR ID: $matchedQrId");
-      await _setDestination(qrId: matchedQrId);
-      await _speak("Destination set to ${_qrData[matchedQrId]['name']}. Follow the QR path.");
     } else {
-      await _speak("Destination not found. Please press the microphone button and try again with a valid location, like 'Library' or 'Cafeteria.'");
+      await _speak(
+        "I couldn’t find that destination. Please say a valid location like 'Cottage' or 'Library'.",
+        priority: true,
+      );
       _awaitingDestination = true;
     }
   }
 
-  Future<void> _speak(String text, {bool priority = false, bool isManualQrScan = false}) async {
-    print("Speaking: $text, Priority: $priority, IsManualQrScan: $isManualQrScan, TTS Initialized: $_ttsInitialized, Speaking: $_isTtsSpeaking, Queue: ${_ttsQueue.length}, Suppressed: $_isTtsSuppressed");
+  Future<void> _speak(String text, {bool priority = false, bool isManualQrScan = false, bool critical = false}) async {
+    print("Speaking: $text, Priority: $priority, Critical: $critical, IsManualQrScan: $isManualQrScan, "
+        "TTS Initialized: $_ttsInitialized, Speaking: $_isTtsSpeaking, Queue: ${_ttsQueue.length}, "
+        "Interaction Active: $_isUserInteractionActive");
+
     if (!_ttsInitialized) {
-      print("TTS not initialized, queuing: $text");
-      _ttsQueue.add(text);
+      print("TTS not initialized, discarding: $text");
       return;
     }
 
-    // Ignore TTS if suppressed, unless it’s a manual QR scan or priority
-    if (_isTtsSuppressed && !isManualQrScan && !priority) {
-      print("TTS suppressed, queuing non-priority: $text");
-      _ttsQueue.add(text);
+    if (_isUserInteractionActive && !isManualQrScan && !critical && !priority) {
+      print("Interaction active, discarding non-critical/priority: $text");
       return;
     }
 
-    // Block non-priority destination messages if not navigating
-    if (!priority && !isManualQrScan && !_isNavigating && text.contains("Destination set to")) {
+    if (!priority && !critical && !isManualQrScan && !_isNavigating && text.contains("Destination set to")) {
       print("Ignoring outdated destination message: $text (not navigating)");
       return;
     }
 
-    if (_isStopping && !priority && !isManualQrScan) {
-      print("Ignoring non-priority speech '$text' during navigation stop");
+    if (_isStopping && !priority && !critical && !isManualQrScan) {
+      print("Ignoring non-critical/priority speech '$text' during navigation stop");
       return;
     }
 
-    // Manual QR scans take highest priority: stop current speech, clear queue
-    if (isManualQrScan) {
-      await _flutterTts.stop();
-      _ttsQueue.clear();
-      _interruptedText = null;
-      _interruptedProgress = null;
-      _isTtsSpeaking = false;
-    } else if (priority && _isTtsSpeaking) {
-      await _flutterTts.stop();
-      if (_ttsQueue.isNotEmpty) {
-        _interruptedText = _ttsQueue.removeFirst();
-        _interruptedProgress = 0.0;
-        print("Interrupted TTS: $_interruptedText");
-      }
-      _isTtsSpeaking = false;
-    } else if (!priority && _isTtsSpeaking) {
-      _ttsQueue.add(text);
-      print("TTS busy, queued: $text");
+    if (_lastAnnouncementText == text && _lastAnnouncementTime != null && DateTime.now().difference(_lastAnnouncementTime!).inSeconds < 4) {
+      debugPrint("Skipping redundant announcement: $text");
       return;
     }
 
     _isTtsSpeaking = true;
-    Completer<void> completer = Completer<void>();
-    _flutterTts.setCompletionHandler(() {
-      print("TTS completed: $text");
-      _isTtsSpeaking = false;
-      completer.complete();
-      if (_interruptedText != null && !isManualQrScan) {
-        print("Resuming: $_interruptedText");
-        _speak(_interruptedText!);
-        _interruptedText = null;
-        _interruptedProgress = null;
-      }
-    });
-    _flutterTts.setErrorHandler((msg) {
-      print("TTS error: $msg");
-      _isTtsSpeaking = false;
-      completer.completeError(Exception(msg));
-    });
-    await _flutterTts.speak(text);
-    await completer.future.catchError((e) => print("TTS failed: $e"));
+    _currentTtsText = text;
 
-    // Process queue for non-manual scans
-    if (!isManualQrScan && _ttsQueue.isNotEmpty && !_isStopping) {
+    try {
+      if (isManualQrScan || critical || priority) {
+        await _navigationAssistant.stop();
+        await _navigationAssistant.speakAnnouncement(
+          text,
+          isCritical: critical,
+          isManualQrScan: isManualQrScan,
+          priority: priority,
+        );
+      } else {
+        await _navigationAssistant.speakAnnouncement(text);
+      }
+
+      while (_navigationAssistant.isSpeaking) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+
+      print("TTS completed: $text");
+      _lastAnnouncementText = text;
+      _lastAnnouncementTime = DateTime.now();
+    } catch (e) {
+      print("TTS failed: $e");
+    } finally {
+      _isTtsSpeaking = false;
+      _currentTtsText = null;
+    }
+
+    // Process queue only if not in stopping state or interaction
+    if (!isManualQrScan && !priority && _ttsQueue.isNotEmpty && !_isStopping && !_isUserInteractionActive) {
       String next = _ttsQueue.removeFirst();
       print("Speaking from queue: $next");
       await _speak(next);
-      await Future.delayed(const Duration(milliseconds: 300));
     }
   }
 
@@ -935,16 +986,20 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
         double? newDistance = (data['distance_cm'] as num?)?.toDouble();
         List<String> newDetectedObjects = (data['objects'] as List?)
-            ?.map((obj) => (obj['object'] as String?) ?? 'Unknown')
+            ?.map((obj) => (obj['object'] as String?)?.toLowerCase() ?? 'unknown')
             .toList() ?? [];
         bool motionDetected = data['motion']?['detected'] as bool? ?? false;
-        String motionDirection = data['motion']?['direction'] as String? ?? '';
+        String motionDirection = (data['motion']?['direction'] as String?)?.toLowerCase() ?? '';
         String movingObjectName = data['motion']?['moving_object'] is Map
-            ? (data['motion']['moving_object']['object'] as String? ?? 'unknown object')
+            ? ((data['motion']['moving_object']['object'] as String?)?.toLowerCase() ?? 'unknown object')
             : 'no moving object';
         List<int> motionCentroid = (data['motion']?['centroid'] as List?)
             ?.map((e) => e as int)
             .toList() ?? [0, 0];
+        List<String> qrCodes = (data['qr_codes'] as List?)
+            ?.map((qr) => (qr['qid'] as String?) ?? '')
+            .where((qid) => qid.isNotEmpty)
+            .toList() ?? [];
 
         setState(() {
           _distanceFromSensor = newDistance;
@@ -955,12 +1010,20 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           _motionCentroid = motionCentroid;
         });
 
-        // Motion announcement...
-        if (_motionDetected && _motionDirection.isNotEmpty && _motionDirection.toLowerCase() != 'stationary') {
+        // Process QR codes
+        for (String qrId in qrCodes) {
+          if (_qrData.containsKey(qrId)) {
+            await handleQRScan(qrId, isManualScan: true);
+          } else {
+            print('Invalid QR code received from Pi: $qrId');
+            await _speak('Invalid QR code detected.', critical: true);
+          }
+        }
+
+        // Motion detection announcements
+        if (_motionDetected && motionDirection.isNotEmpty && motionDirection != 'stationary') {
           final now = DateTime.now();
-          const Duration motionDebounceDuration = Duration(seconds: 6);
-          if (!_isMotionAnnouncementInProgress &&
-              (_lastMotionAnnouncement == null || now.difference(_lastMotionAnnouncement!) >= motionDebounceDuration)) {
+          if (_lastMotionAnnouncement == null || now.difference(_lastMotionAnnouncement!).inSeconds >= 6) {
             String? selectedObject;
             final priorityOrder = ['truck', 'car', 'bike', 'bicycle', 'person'];
             for (String priority in priorityOrder) {
@@ -972,85 +1035,60 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
             String motionText;
             if (selectedObject != null) {
-              motionText = "$selectedObject detected moving $_motionDirection";
+              motionText = "$selectedObject detected moving $motionDirection";
             } else if (_movingObjectName != 'no moving object') {
-              motionText = "$_movingObjectName detected moving $_motionDirection";
+              motionText = "$_movingObjectName detected moving $motionDirection";
             } else {
-              motionText = "unknown object moving $_motionDirection";
+              motionText = "unknown object moving $motionDirection";
             }
 
-            setState(() => _isMotionAnnouncementInProgress = true);
-            await _speak(motionText, priority: true);
-            setState(() {
-              _isMotionAnnouncementInProgress = false;
-              _lastMotionAnnouncement = now;
-            });
+            print('Attempting to announce motion: $motionText, Interaction Active: $_isUserInteractionActive, TTS Speaking: $_isTtsSpeaking');
+            _lastMotionAnnouncement = now;
+            await _speak(motionText, critical: true);
+            print('Motion announcement processed: $motionText');
+          } else {
+            print('Motion announcement suppressed (debounced): $motionDirection');
           }
+        } else {
+          print('Motion announcement skipped: Detected=$_motionDetected, Direction=$motionDirection');
         }
 
-        // Obstacle detection...
+        // Threshold-based announcements and vibration
         final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
         bool isBelowThreshold = _distanceFromSensor != null && _distanceFromSensor! < themeProvider.distanceThreshold;
 
-        // Vibration with debounce
-        if (isBelowThreshold && await Vibration.hasVibrator()) {
-          final now = DateTime.now();
-          const int vibrationInterval = 1000; // 2 seconds between vibrations
-          if (_lastVibrationTime == null || now.difference(_lastVibrationTime!) >= Duration(milliseconds: vibrationInterval)) {
-            Vibration.vibrate(duration: themeProvider.vibrationDuration);
-            _lastVibrationTime = now;
-          }
-        }
-
-        // Priority object announcement
-        if (isBelowThreshold && !_isTtsSpeaking && !_isNavigating) {
-          bool shouldAnnounce = !_lastAnnouncedBelowThreshold ||
-              (_lastObjectAnnouncementTime != null &&
-                  DateTime.now().difference(_lastObjectAnnouncementTime!).inSeconds >= themeProvider.announcementInterval);
-          if (shouldAnnounce) {
-            // Filter for priority objects only
-            List<String> priorityObjects = _detectedObjects.where((obj) {
-              String objLower = obj.toLowerCase();
-              return [
-                'person',
-                'car',
-                'truck',
-                'bus',
-                'bike',
-                'bicycle',
-                'motorbike'
-              ].contains(objLower);
-            }).toList();
-
-            if (priorityObjects.isNotEmpty) {
-              String text = "${priorityObjects.join(", ")} detected";
-              await _speak(text);
-              _lastObjectAnnouncementTime = DateTime.now();
-              _lastAnnouncedBelowThreshold = true;
+        if (isBelowThreshold) {
+          final priorityOrder = ['truck', 'car', 'bike', 'bicycle', 'person'];
+          String? detectedObject;
+          for (String priority in priorityOrder) {
+            if (_detectedObjects.contains(priority)) {
+              detectedObject = priority;
+              break;
             }
           }
-        } else if (!isBelowThreshold) {
-          _lastAnnouncedBelowThreshold = false;
-        }
 
-        // QR handling...
-        if (data['qr_codes'] != null && (data['qr_codes'] as List).isNotEmpty) {
-          for (var qr in data['qr_codes']) {
-            if (qr['type'] == "TripuraUni") {
-              String qrId = qr['qid'];
-              print('Manual QR detected from Pi: $qrId, previously _lastDetectedQrId: $_lastDetectedQrId, _qrDetected: $_qrDetected');
-              // Queue QR scan to handle rapid scans
-              if (!_qrScanQueue.contains(qrId)) {
-                _qrScanQueue.add(qrId);
-              }
-              _processQrQueue();
+          if (detectedObject != null) {
+            String objectText = "$detectedObject is in front of you";
+            print('Attempting to announce static object: $objectText');
+            await _speak(objectText, critical: true);
+          }
+
+          if (await Vibration.hasVibrator()) {
+            const int vibrationInterval = 1000;
+            final now = DateTime.now();
+            if (_lastVibrationTime == null || now.difference(_lastVibrationTime!) >= const Duration(milliseconds: vibrationInterval)) {
+              Vibration.vibrate(duration: themeProvider.vibrationDuration);
+              setState(() {
+                _lastVibrationTime = now;
+              });
             }
           }
         }
+      } else {
+        print('Failed to fetch data: ${response.statusCode}');
       }
     } catch (e) {
-      print('Error fetching distance: $e');
-      setState(() => _isMotionAnnouncementInProgress = false);
+      print('Error fetching data: $e');
     }
   }
 
@@ -1122,18 +1160,20 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   Future<void> handleQRScan(String scannedQr, {bool isManualScan = false}) async {
     debugPrint("handleQRScan: Entered with QR: $scannedQr, isManualScan: $isManualScan, _qrDetected: $_qrDetected, _lastDetectedQrId: $_lastDetectedQrId, _isNavigating: $_isNavigating, _isProcessingQr: $_isProcessingQr");
 
-    // Allow manual scans to bypass _isProcessingQr lock
-    if (_isProcessingQr && !isManualScan) {
-      debugPrint("handleQRScan: Skipping QR scan: $scannedQr (Processing: $_isProcessingQr, not manual)");
+    // Queue all scans to prevent concurrent processing
+    if (_isProcessingQr) {
+      debugPrint("handleQRScan: Queuing QR scan: $scannedQr (Processing: $_isProcessingQr)");
+      _qrScanQueue.add(scannedQr);
       return;
     }
 
-    // Set timeout to reset _isProcessingQr in case of hangs
+    // Set processing flag and timeout
     _isProcessingQr = true;
     Timer(const Duration(seconds: 5), () {
       if (_isProcessingQr) {
         debugPrint("handleQRScan: Timeout triggered, resetting _isProcessingQr for QR: $scannedQr");
         _isProcessingQr = false;
+        _processQrQueue();
       }
     });
 
@@ -1150,7 +1190,22 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         return;
       }
 
-      // Update state early to ensure _lastDetectedQrId is set
+      // Check for duplicate manual scan
+      if (isManualScan &&
+          _lastManualScanQrId == scannedQr &&
+          _lastManualScanTime != null &&
+          DateTime.now().difference(_lastManualScanTime!) < Duration(seconds: 6)) {
+        debugPrint('Ignoring duplicate manual scan for QR: $scannedQr');
+        return; // Skip processing
+      }
+
+      // Update manual scan state
+      if (isManualScan) {
+        _lastManualScanQrId = scannedQr;
+        _lastManualScanTime = DateTime.now();
+      }
+
+      // Update state
       setState(() {
         _lastDetectedQrId = scannedQr;
         _initialQrPosition = LatLng(
@@ -1158,9 +1213,6 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           _qrData[scannedQr]['current_location'][1],
         );
         _qrDetected = true;
-        if (isManualScan) {
-          _lastManualScanTime = DateTime.now();
-        }
       });
 
       _qrDisplayTimer?.cancel();
@@ -1199,36 +1251,19 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
       if (scannedQr == _destinationQrId) {
         debugPrint("handleQRScan: Destination reached: $scannedQr");
-        await _speak("You have reached ${_qrData[scannedQr]['name']} via ${isManualScan ? 'manual scan' : 'proximity'}.", priority: true, isManualQrScan: isManualScan);
-        await _stopNavigation();
+        // Destination reached: Stop TTS, speak with priority, and pause
+        await _navigationAssistant.stop(); // Clear ongoing announcements
+        await _speak("Destination ${_qrData[scannedQr]['name']} reached.", priority: true, isManualQrScan: isManualScan); // Use priority to ensure spoken
+        await _navigationAssistant.waitForCompletion();
+        await Future.delayed(const Duration(seconds: 0)); // 1-second pause
+        await _stopNavigation(silent: true); // Silent to avoid duplicate stop announcement
         setState(() {});
       } else if (path.contains(scannedQr)) {
         debugPrint("handleQRScan: On path QR: $scannedQr, index: ${path.indexOf(scannedQr)}");
         int currentIndex = path.indexOf(scannedQr);
-        if (currentIndex + 1 < path.length) {
-          String nextQr = path[currentIndex + 1];
-          await _speak("You scanned ${_qrData[scannedQr]['name']} ${isManualScan ? 'manually' : 'by proximity'}. Proceed to ${_qrData[nextQr]['name']}.", priority: true, isManualQrScan: isManualScan);
-          setState(() {
-            _polylines.clear();
-            _polylinePoints = path
-                .sublist(currentIndex)
-                .map((qrId) => LatLng(
-              _qrData[qrId]['current_location'][0],
-              _qrData[qrId]['current_location'][1],
-            ))
-                .toList();
-            _polylines.add(Polyline(
-              polylineId: const PolylineId('qr_route'),
-              points: _polylinePoints,
-              color: Colors.green,
-              width: 5,
-            ));
-          });
-          await _navigateThroughQrPath(path.sublist(currentIndex), announceFullPath: false);
-        } else {
-          debugPrint("handleQRScan: Unexpected: scanned QR is last in path but not destination");
-          await _speak("Unexpected QR position. Please scan another QR.", priority: true, isManualQrScan: isManualScan);
-        }
+        String nextQr = path[currentIndex + 1];
+        await _speak("You scanned ${_qrData[scannedQr]['name']} ${isManualScan ? 'manually' : 'by proximity'}. Proceed to ${_qrData[nextQr]['name']}.", priority: true, isManualQrScan: isManualScan);
+        await _navigateThroughQrPath(path, announceFullPath: false, currentIndex: currentIndex);
         setState(() {});
       } else {
         debugPrint("handleQRScan: Off path QR: $scannedQr, recalculating");
@@ -1237,10 +1272,10 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         debugPrint("handleQRScan: New calculated path: $newPath");
         if (newPath.isNotEmpty) {
           setState(() {
-            _isNewNavigation = true; // Trigger full path announcement for new path
+            _isNewNavigation = true;
           });
           await _speak("New path calculated to ${_qrData[_destinationQrId!]['name']} starting from ${_qrData[scannedQr]['name']}.", priority: true, isManualQrScan: isManualScan);
-          await _navigateThroughQrPath(newPath, announceFullPath: true);
+          await _navigateThroughQrPath(newPath, announceFullPath: true, currentIndex: 0);
           setState(() {});
         } else {
           await _speak("No QR path found from ${_qrData[scannedQr]['name']} to ${_qrData[_destinationQrId!]['name']}. Please scan another QR or set a new destination.", priority: true, isManualQrScan: isManualScan);
@@ -1252,6 +1287,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     } finally {
       _isProcessingQr = false;
       debugPrint("handleQRScan: Finished processing QR: $scannedQr, _isProcessingQr: $_isProcessingQr, _lastDetectedQrId: $_lastDetectedQrId");
+      _processQrQueue();
     }
   }
 
@@ -1276,6 +1312,11 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   }
 
   Future<void> handleLocationChange(Position position) async {
+    if (_isStopping || _isListening || (!_isNavigating && _destinationQrId == null)) {
+      debugPrint("handleLocationChange: Skipping due to stopping, listening, or no active navigation");
+      return;
+    }
+
     setState(() {
       _currentPosition = position;
     });
@@ -1588,6 +1629,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     _porcupineManager?.delete();
     _isPorcupineActive = false;
     qrDataChangedNotifier.removeListener(_reloadQrData);
+    _navigationAssistant.dispose();
     super.dispose();
   }
 
@@ -1660,36 +1702,45 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         _stopListening();
       }
 
-      // Stop TTS and ensure it’s fully stopped
-      await _flutterTts.stop();
-      await _flutterTts.awaitSpeakCompletion(true);
-      _ttsQueue.clear();
+      // Stop TTS to clear ongoing announcements
+      await _navigationAssistant.stop();
+      // Retry stop to ensure _isSpeaking is cleared
+      if (_navigationAssistant.isSpeaking) {
+        await Future.delayed(Duration(milliseconds: 200));
+        await _navigationAssistant.stop();
+      }
       _isTtsSpeaking = false;
+      _qrScanQueue.clear(); // Clear QR scan queue
 
-      // Reset state
+      // Reset navigation and voice state
       setState(() {
         _polylines.clear();
         _markers.removeWhere((marker) => marker.markerId.value == 'destination');
         _destination = null;
         _destinationQrId = null;
+        _lastDetectedQrId = null; // Clear to prevent handleLocationChange triggers
         _directionsCache.clear();
         _polylinePoints.clear();
-        _lastDetectedQrId = null;
         _qrDetected = false;
+        _awaitingDestination = false; // Clear voice command state
+        _isUserInteractionActive = false; // Stop voice interaction
+        _isListening = false; // Ensure no voice command re-trigger
       });
-      _awaitingDestination = false;
       _awaitingGpsSwitchResponse = false;
 
-      // Announce stop as priority
+      // Announce stop with priority to ensure it’s spoken
       if (!silent) {
-        print("Queueing stop announcement...");
-        await _speak("Navigation has been stopped.", priority: true);
+        print("Speaking stop announcement...");
+        // Wait to ensure prior TTS completes
+        await Future.delayed(Duration(seconds: 1));
+        await _speak("Navigation has been stopped.", priority: true); // Priority to bypass _isSpeaking
+        await _navigationAssistant.waitForCompletion(); // Ensure announcement completes
+        await Future.delayed(const Duration(seconds: 1)); // 1-second pause
       }
 
-      print("Navigation stopped${silent ? ' silently' : ''}. AwaitingDestination: $_awaitingDestination, Listening: $_isListening");
-      await Future.delayed(const Duration(seconds: 1));
+      print("Navigation stopped${silent ? ' silently' : ''}. AwaitingDestination: $_awaitingDestination, Listening: $_isListening, _lastDetectedQrId: $_lastDetectedQrId");
       _restartPorcupine();
-      _isStopping = false; // Move this after Porcupine restart
+      _isStopping = false; // Unlock state after all operations
     }
   }
 
@@ -1777,8 +1828,23 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   }
 
   Future<void> _setDestination({String? qrId, LatLng? gpsDestination, bool useGps = false}) async {
+    if (_isStopping) {
+      debugPrint("_setDestination: Skipping due to stopping, qrId: $qrId, gpsDestination: $gpsDestination");
+      return;
+    }
+
+    // Validate qrId before accessing _qrData
+    if (qrId != null && !_qrData.containsKey(qrId)) {
+      debugPrint("_setDestination: Invalid QR ID: $qrId");
+      await _speak("Invalid destination. Please choose a valid destination.", priority: true);
+      setState(() => _isNavigating = false);
+      return;
+    }
+
     setState(() {
-      _destination = gpsDestination ?? (qrId != null ? LatLng(_qrData[qrId]['current_location'][0], _qrData[qrId]['current_location'][1]) : null);
+      _destination = gpsDestination ?? (qrId != null && _qrData[qrId] != null
+          ? LatLng(_qrData[qrId]['current_location'][0], _qrData[qrId]['current_location'][1])
+          : null);
       _destinationQrId = qrId;
       _polylines.clear();
       _polylinePoints.clear();
@@ -1787,7 +1853,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         _markers.add(Marker(
           markerId: const MarkerId('destination'),
           position: _destination!,
-          infoWindow: InfoWindow(title: qrId != null ? _qrData[qrId]['name'] : 'Destination'),
+          infoWindow: InfoWindow(title: qrId != null && _qrData[qrId] != null ? _qrData[qrId]['name'] : 'Destination'),
           icon: destinationIcon,
         ));
       }
@@ -1824,21 +1890,27 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       start = _currentPosition != null ? LatLng(_currentPosition!.latitude, _currentPosition!.longitude) : null;
     }
 
-    if (start == null) {
+    if (start == null || (startQrId != null && !_qrData.containsKey(startQrId))) {
       await _speak("No location available. Please scan a QR code or enable GPS to start navigation.", priority: true);
       setState(() => _isNavigating = false);
       return;
     }
 
+    // Clear prior TTS to avoid overlap
+    await _navigationAssistant.stop();
+
+    // Use non-nullable destination for _fetchAndSpeakDirections
+    final LatLng destination = _destination!;
+
     if (qrId != null && _qrData.containsKey(qrId) && !useGps) {
+      await _speak("Calculating path from ${_qrData[startQrId]['name']} to ${_qrData[qrId]['name']} via QR path.", priority: true);
       if (startQrId != null) {
-        await _speak("Navigating to ${_qrData[qrId]['name']} via QR path from ${_qrData[startQrId]['name']}.", priority: true);
-        List<String> qrPath = findShortestPath(startQrId!, qrId);
+        List<String> qrPath = findShortestPath(startQrId, qrId);
         if (qrPath.isNotEmpty) {
           await _navigateThroughQrPath(qrPath, announceFullPath: true);
         } else {
           await _speak("No QR path found from ${_qrData[startQrId]['name']}. Switching to GPS navigation.", priority: true);
-          await _fetchAndSpeakDirections(start, _destination!);
+          await _fetchAndSpeakDirections(start, destination);
         }
       } else {
         await _speak("No recent QR scanned. Guiding to the nearest QR: ${_qrData[startQrId]['name']} to start navigation to ${_qrData[qrId]['name']}.", priority: true);
@@ -1848,40 +1920,61 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         );
       }
     } else if (gpsDestination != null || useGps) {
-      await _speak("Navigating to your selected location via GPS.", priority: true);
-      await _fetchAndSpeakDirections(start, _destination!);
+      await _speak("Calculating path to your selected location via GPS.", priority: true);
+      await _fetchAndSpeakDirections(start, destination);
     }
   }
 
   Future<void> _announceQrPath(List<String> qrPath) async {
-    if (qrPath.isEmpty) return;
+    if (qrPath.isEmpty) {
+      await _speak("No QR path found to the destination.", priority: true);
+      return;
+    }
 
     String pathAnnouncement = "To reach your destination, you will pass through the following QR codes: ";
     for (int i = 0; i < qrPath.length; i++) {
-      String qrName = _qrData[qrPath[i]]['name'];
+      String qrName = _qrData[qrPath[i]]['name'] ?? qrPath[i];
       pathAnnouncement += qrName;
       if (i < qrPath.length - 1) {
         pathAnnouncement += ", ";
       }
     }
     pathAnnouncement += ". Please follow the QR path.";
-    await _speak(pathAnnouncement);
+    await _speak(pathAnnouncement, priority: true);
   }
 
-  Future<void> _navigateThroughQrPath(List<String> qrPath, {bool announceFullPath = true}) async {
-    debugPrint("_navigateThroughQrPath: Entered with Path: $qrPath, announceFullPath: $announceFullPath, _isNewNavigation: $_isNewNavigation");
-
-    if (qrPath.isEmpty) {
-      debugPrint("_navigateThroughQrPath: Empty path, stopping navigation");
-      await _speak("No valid QR path available. Please set a destination.", priority: true);
-      await _stopNavigation();
+  Future<void> _navigateThroughQrPath(List<String> qrPath, {bool announceFullPath = true, int currentIndex = 0}) async {
+    debugPrint("_navigateThroughQrPath: Entered with Path: $qrPath, currentIndex: $currentIndex, announceFullPath: $announceFullPath, _isNewNavigation: $_isNewNavigation, _destinationQrId: $_destinationQrId");
+    if (_isStopping || _destinationQrId == null || qrPath.isEmpty) {
+      debugPrint("_navigateThroughQrPath: Empty path or no destination, skipping");
       return;
     }
 
-    if (qrPath.length <= 1) {
+    // Existing logic for path navigation
+    if (announceFullPath) {
+      await _speak("Destination set to ${_qrData[_destinationQrId!]['name']}. Follow the QR path.", priority: true);
+    }
+
+    if (qrPath.isEmpty || _destinationQrId == null) {
+      debugPrint("_navigateThroughQrPath: Empty path or no destination, stopping navigation");
+      //await _speak("No valid QR path or destination set. Please set a destination.", priority: true);
+      await _stopNavigation(silent: true);
+      return;
+    }
+
+    // Check if at destination
+    if (currentIndex >= qrPath.length - 1 && qrPath.last == _destinationQrId) {
       debugPrint("_navigateThroughQrPath: Reached destination: ${qrPath.last}");
+      await _navigationAssistant.stop();
+      _ttsQueue.clear();
       await _speak("You have reached your destination: ${_qrData[qrPath.last]['name']}.", priority: true);
-      await _stopNavigation();
+      await _stopNavigation(silent: true);
+      return;
+    }
+
+    if (currentIndex >= qrPath.length) {
+      debugPrint("_navigateThroughQrPath: Invalid currentIndex $currentIndex for path length ${qrPath.length}");
+      await _speak("Invalid path position. Please scan another QR.", priority: true);
       return;
     }
 
@@ -1894,11 +1987,14 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
       }
     }
 
-    // Set up QR waypoints for visualization
-    List<LatLng> pathPoints = qrPath.map((qrId) => LatLng(
+    // Set up QR waypoints for visualization from currentIndex onward
+    List<LatLng> pathPoints = qrPath
+        .sublist(currentIndex)
+        .map((qrId) => LatLng(
       _qrData[qrId]['current_location'][0],
       _qrData[qrId]['current_location'][1],
-    )).toList();
+    ))
+        .toList();
 
     setState(() {
       _polylines.clear();
@@ -1910,9 +2006,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         width: 5,
       ));
 
-      // Clear all markers except destination and add new QR markers
+      // Clear QR markers and add from currentIndex onward
       _markers.removeWhere((marker) => marker.markerId.value.startsWith('qr_'));
-      for (String qrId in qrPath) {
+      for (String qrId in qrPath.sublist(currentIndex)) {
         LatLng qrPos = LatLng(_qrData[qrId]['current_location'][0], _qrData[qrId]['current_location'][1]);
         _markers.add(Marker(
           markerId: MarkerId('qr_$qrId'),
@@ -1925,19 +2021,25 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
     // Announce the QR path only if requested and it's a new navigation
     if (announceFullPath && _isNewNavigation) {
-      await _announceQrPath(qrPath);
+      await _announceQrPath(qrPath.sublist(currentIndex));
+      //await _speak("Navigation started. Follow the QR path to ${_qrData[_destinationQrId!]['name']}.", priority: true);
       setState(() {
-        _isNewNavigation = false; // Reset after announcing
+        _isNewNavigation = false;
+      });
+    } else if (_isNewNavigation) {
+      await _speak("Navigation started to ${_qrData[_destinationQrId!]['name']}.", priority: true);
+      setState(() {
+        _isNewNavigation = false;
       });
     }
 
-    // Start or update navigation with the new QR path
-    await _startPathNavigation(qrPath: qrPath);
-    debugPrint("_navigateThroughQrPath: Path updated, qrPath: $qrPath");
+    // Start navigation with the full QR path and current index
+    await _startPathNavigation(qrPath: qrPath, currentIndex: currentIndex);
+    debugPrint("_navigateThroughQrPath: Path updated, qrPath: $qrPath, currentIndex: $currentIndex");
   }
 
-  Future<void> _startPathNavigation({List<String>? directions, List<String>? qrPath}) async {
-    debugPrint("_startPathNavigation: Starting with qrPath: $qrPath, directions: $directions, _lastDetectedQrId: $_lastDetectedQrId");
+  Future<void> _startPathNavigation({List<String>? qrPath, List<String>? directions, int currentIndex = 0}) async {
+    debugPrint("_startPathNavigation: qrPath: $qrPath, directions: $directions, currentIndex: $currentIndex, _lastDetectedQrId: $_lastDetectedQrId");
 
     if ((qrPath == null || qrPath.isEmpty) && (directions == null || directions.isEmpty)) {
       debugPrint("_startPathNavigation: No valid path available");
@@ -1953,26 +2055,26 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
     }
 
     DateTime lastAnnouncement = DateTime.now().subtract(const Duration(seconds: 2));
-    int currentStepIndex = 0;
-    const double waypointThreshold = 3.0; // Distance for deemed QR scanned in meters
-    const double finalThreshold = 10.0; // For GPS destination
-    const double proximityThreshold = 30.0; // Announce when near final QR
+    int currentStepIndex = currentIndex;
+    const double waypointThreshold = 3.0;
+    const double finalThreshold = 3.0;
+    const double proximityThreshold = 30.0;
     const double headingTolerance = 45.0;
-    const int updateInterval = 6; // Increased to avoid spamming TTS
+    const int updateInterval = 5; // 4 seconds for frequent updates
     String? lastDirectionText;
     DateTime? proximityAnnounced;
 
-    // Adjust currentStepIndex based on _lastDetectedQrId
-    if (qrPath != null && qrPath.isNotEmpty && _lastDetectedQrId != null && qrPath.contains(_lastDetectedQrId)) {
+    // Adjust currentStepIndex based on _lastDetectedQrId only if currentIndex is 0
+    if (currentIndex == 0 && qrPath != null && qrPath.isNotEmpty && _lastDetectedQrId != null && qrPath.contains(_lastDetectedQrId)) {
       int qrIndex = qrPath.indexOf(_lastDetectedQrId!);
-      currentStepIndex = qrIndex + 1; // Point to next QR after the scanned one
+      currentStepIndex = qrIndex < qrPath.length - 1 ? qrIndex + 1 : qrIndex;
       debugPrint("_startPathNavigation: Adjusted currentStepIndex to $currentStepIndex based on _lastDetectedQrId: $_lastDetectedQrId");
     }
 
     _positionStream = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.high,
-        distanceFilter: 1,
+        distanceFilter: 0, // Frequent updates
       ),
     ).listen((Position position) async {
       debugPrint("_startPathNavigation: Position update, currentStepIndex: $currentStepIndex, qrPath: $qrPath, _lastDetectedQrId: $_lastDetectedQrId");
@@ -1992,8 +2094,9 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
 
       List<LatLng> waypoints = qrPath != null && qrPath.isNotEmpty
           ? qrPath.map((qrId) => LatLng(
-          _qrData[qrId]['current_location'][0],
-          _qrData[qrId]['current_location'][1])).toList()
+        _qrData[qrId]['current_location'][0],
+        _qrData[qrId]['current_location'][1],
+      )).toList()
           : _polylinePoints;
 
       if (waypoints.isEmpty) {
@@ -2005,7 +2108,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         return;
       }
 
-      // Check if off-path and recalculate if necessary, but skip for final QR
+      // Check if off-path and recalculate if necessary
       if (qrPath != null && qrPath.isNotEmpty && currentStepIndex < qrPath.length - 1) {
         double minDistanceToPath = double.infinity;
         for (int i = 0; i < waypoints.length - 1; i++) {
@@ -2031,25 +2134,20 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
               await _speak("You’re off course. Recalculating from ${_qrData[nearestQrId]['name']}.", priority: true);
               await _positionStream?.cancel();
               _positionStream = null;
-              await _navigateThroughQrPath(newPath);
+              await _navigateThroughQrPath(newPath, currentIndex: 0); // Start from beginning of new path
               return;
             }
           }
         }
       }
 
-      // Ensure we don't guide to a QR already scanned
-      if (qrPath != null && qrPath.isNotEmpty && currentStepIndex < qrPath.length && _lastDetectedQrId == qrPath[currentStepIndex]) {
-        debugPrint("_startPathNavigation: Current QR $_lastDetectedQrId already scanned, advancing currentStepIndex");
-        currentStepIndex++;
-        if (currentStepIndex >= qrPath.length) {
-          debugPrint("_startPathNavigation: Reached end of path: ${qrPath.last}");
-          await _speak("You have reached ${_qrData[qrPath.last]['name']}.", priority: true);
-          await _stopNavigation(silent: true);
-          await _positionStream?.cancel();
-          _positionStream = null;
-          return;
-        }
+      // Validate currentStepIndex
+      if (qrPath != null && qrPath.isNotEmpty && currentStepIndex >= qrPath.length) {
+        debugPrint("_startPathNavigation: Invalid currentStepIndex $currentStepIndex, stopping navigation");
+        await _stopNavigation(silent: true);
+        await _positionStream?.cancel();
+        _positionStream = null;
+        return;
       }
 
       double distanceToNextWaypoint = Geolocator.distanceBetween(
@@ -2081,13 +2179,19 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
         double relativeBearing = bearingToNext - (heading ?? 0);
         if (relativeBearing < 0) relativeBearing += 360;
         double turnAngle = relativeBearing <= 180 ? relativeBearing : 360 - relativeBearing;
-        turnAngle = (turnAngle / 5).round() * 5;
+        // Custom rounding: ≥ X.5 rounds up, < X.5 rounds down
+        double decimalPart = turnAngle - turnAngle.floor();
+        if (decimalPart >= 0.5) {
+          turnAngle = turnAngle.ceilToDouble();
+        } else {
+          turnAngle = turnAngle.floorToDouble();
+        }
         if (turnAngle < headingTolerance) {
           directionText = "Proceed straight";
         } else {
           directionText = relativeBearing <= 180
-              ? "Turn right $turnAngle degrees"
-              : "Turn left $turnAngle degrees";
+              ? "Turn right ${turnAngle.toInt()} degrees"
+              : "Turn left ${turnAngle.toInt()} degrees";
         }
       }
 
@@ -2096,20 +2200,31 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           (currentStepIndex == (qrPath?.length ?? directions!.length) - 1 && distanceToNextWaypoint <= finalThreshold)) {
         if (qrPath != null && qrPath.isNotEmpty) {
           if (currentStepIndex == qrPath.length - 1) {
+            // Skip announcement if destination was recently scanned
+            if (_lastDetectedQrId == qrPath.last && _lastManualScanTime != null &&
+                DateTime.now().difference(_lastManualScanTime!).inSeconds < 10) {
+              debugPrint("_startPathNavigation: Skipping destination announcement, handled by handleQRScan");
+              await _stopNavigation(silent: true);
+              await _positionStream?.cancel();
+              _positionStream = null;
+              return;
+            }
             String destinationName = _qrData[qrPath.last]['name'] ?? 'your destination';
             debugPrint("_startPathNavigation: Reached destination: $destinationName at distance: $distanceToNextWaypoint");
-            await _speak("You have reached $destinationName.", priority: true);
+            await _speak("Destination $destinationName has been reached. Navigation has been stopped.", priority: true);
             await _stopNavigation(silent: true);
             await _positionStream?.cancel();
             _positionStream = null;
             return;
           } else {
             String currentQrName = _qrData[qrPath[currentStepIndex]]['name'] ?? qrPath[currentStepIndex];
-            String nextQrName = _qrData[qrPath[currentStepIndex + 1]]['name'] ?? qrPath[currentStepIndex + 1];
+            String nextQrName = currentStepIndex + 1 < qrPath.length
+                ? _qrData[qrPath[currentStepIndex + 1]]['name'] ?? qrPath[currentStepIndex + 1]
+                : 'your destination';
             debugPrint("_startPathNavigation: Reached QR: $currentQrName, advancing to $nextQrName");
             await _speak("You have reached $currentQrName by proximity. Proceed to $nextQrName.", priority: true);
             setState(() {
-              _lastDetectedQrId = qrPath[currentStepIndex]; // Simulate QR scan
+              _lastDetectedQrId = qrPath[currentStepIndex];
               _qrDetected = true;
             });
             _qrDisplayTimer?.cancel();
@@ -2129,7 +2244,7 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
             return;
           } else {
             currentStepIndex++;
-            await _speak(directions![currentStepIndex], priority: true);
+            await _speak(_refineDirection(directions![currentStepIndex]), priority: true);
             lastDirectionText = null;
           }
         }
@@ -2143,23 +2258,29 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
           }
         }
 
+        // Skip announcements if TTS is busy with critical speech
+        if (_isTtsSpeaking && _currentTtsText != null && _currentTtsText!.contains("detected")) {
+          debugPrint("_startPathNavigation: Skipping navigation announcement due to active critical speech");
+          return;
+        }
+
         String distanceText = distanceToNextWaypoint < 1000
             ? "${distanceToNextWaypoint.toStringAsFixed(0)} meters"
             : "${(distanceToNextWaypoint / 1000).toStringAsFixed(1)} kilometers";
         String announcement;
 
-        // Always provide guidance to the next QR
         if (qrPath != null && qrPath.isNotEmpty) {
           String nextQrName = _qrData[qrPath[currentStepIndex]]['name'] ?? qrPath[currentStepIndex];
           announcement = "$directionText towards $nextQrName in $distanceText.";
         } else {
-          announcement = "$directionText in $distanceText. ${directions![currentStepIndex]}";
+          announcement = "$directionText in $distanceText. ${_refineDirection(directions![currentStepIndex])}";
         }
 
-        if (lastDirectionText != directionText || now.difference(lastAnnouncement).inSeconds >= updateInterval) {
+        // Announce if direction changed or time elapsed
+        if (lastDirectionText != announcement || now.difference(lastAnnouncement).inSeconds >= updateInterval) {
           debugPrint("_startPathNavigation: Announcing: $announcement");
-          await _speak(announcement, priority: qrPath != null);
-          lastDirectionText = directionText;
+          await _speak(announcement, priority: true);
+          lastDirectionText = announcement;
           lastAnnouncement = now;
         }
       }
@@ -2919,8 +3040,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _speechRate = value;
                 });
               },
-              onChangeEnd: (value) {
-                themeProvider.setSpeechRate(value);
+              onChangeEnd: (value) async {
+                await themeProvider.setSpeechRate(value);
+                await (context.findAncestorStateOfType<_BlindNavigationAppState>()
+                    ?._navigationAssistant
+                    ?.updateSpeechRate(value));
               },
             ),
             const SizedBox(height: 20),
@@ -2971,12 +3095,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
             TextField( // Add input field for IP
               controller: _ipController,
               decoration: InputDecoration(
-                border: OutlineInputBorder(),
+                border: const OutlineInputBorder(),
                 labelText: 'Enter IP Address',
                 labelStyle: TextStyle(color: themeProvider.isDarkMode ? Colors.white70 : Colors.black54),
               ),
               style: TextStyle(color: themeProvider.isDarkMode ? Colors.white : Colors.black),
-              keyboardType: TextInputType.numberWithOptions(decimal: true),
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
             ),
             const SizedBox(height: 10),
             ElevatedButton( // Add save button
@@ -3196,7 +3320,7 @@ class ServerDataScreen extends StatelessWidget {
               _buildDataItem('Motion Direction', motionDirection.isEmpty ? 'N/A' : motionDirection, themeProvider),
               _buildDataItem('Motion Centroid', motionCentroid.length == 2 ? '[${motionCentroid[0]}, ${motionCentroid[1]}]' : 'N/A', themeProvider),
               _buildDataItem('Moving Object', movingObjectName.isEmpty ? 'None' : movingObjectName, themeProvider),
-              _buildDataItem('Version:', 'kill me', themeProvider), // version checker
+              _buildDataItem('Version:', 'pro plus', themeProvider), // version checker
             ],
           )
       ),
