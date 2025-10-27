@@ -229,8 +229,8 @@ class _BlindNavigationAppState extends State<BlindNavigationApp> {
   Future<void> _initializePorcupine() async {
     try {
       _porcupineManager = await PorcupineManager.fromKeywordPaths(
-        "7tWk5dPHECjbjqu9XalqySvx/CgIIoBw6AtPCt57CesqALrWg9fF5Q==",
-        ["assets/hey-coco_en_android_v3_0_0.ppn"],
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        ["assets/xxxxxxxxxx"],
             (int keywordIndex) {
           if (keywordIndex == 0) { // "Hey Coco" detected
             print("Wake word 'Hey Coco' detected");
